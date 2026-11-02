@@ -1,7 +1,8 @@
 #!/bin/bash
 # Server contract check (~3 s), no songs needed: builds a one-chop fake pack in a temp library,
 # then checks files, path safety, the command queue, state, song requests and uploads.
-# If setup.sh has been run, it also checks the chopper's guards (bad audio, name clashes; ~10 s).
+# If setup.sh has been run, it also checks the chopper: bad audio, song names and clashes,
+# the dropped-file retry, --slug, and concurrent runs (~15 s).
 set -euo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -148,7 +149,7 @@ PY
 VENV_PY="$(bash -c '. "$1/config.sh"; echo "$VS_VENV/bin/python"' _ "$HERE")"
 if [ -x "$VENV_PY" ]; then
   SAMPLER_HOME="$LIB/chop" "$VENV_PY" -I - "$HERE" "$LIB/chop" <<'PY'
-import sys
+import os, signal, subprocess, sys
 from pathlib import Path
 import numpy as np, soundfile as sf
 here, lib = sys.argv[1], Path(sys.argv[2])
@@ -160,25 +161,56 @@ bad = 0
 def check(name, cond):
     global bad
     print(("PASS  " if cond else "FAIL  ") + name); bad |= not cond
-def exits(fn, *a):
+def exits(fn, *a, **k):
     try:
-        fn(*a)
+        fn(*a, **k)
     except SystemExit as e:
         return str(e.code)
     return ""
+def song(path, secs, seed):
+    # noise with a click every half second: audible, not silent
+    rng = np.random.default_rng(seed)
+    x = 0.05 * rng.standard_normal((44100 * secs, 2)).astype("float32")
+    x[:: 22050] = 0.9
+    sf.write(path, x, 44100)
+
 sf.write(lib / "silent.wav", np.zeros((44100 * 30, 2), "float32"), 44100)
 check("silent audio refused before splitting", "silent" in exits(fp.check_audio, lib / "silent.wav"))
-t = np.arange(44100 * 5) / 44100
-sf.write(lib / "short.wav", (0.3 * np.sin(2 * np.pi * 220 * t)).astype("float32"), 44100)
+song(lib / "short.wav", 5, 0)
 check("5 s clip refused as too short", "at least 20 s" in exits(fp.check_audio, lib / "short.wav"))
+signal.alarm(60)    # if the zero-tempo loop comes back, fail instead of hanging the suite
 z = np.zeros(fp.SR * 30, "float32")
 check("no beat -> clean exit, not an endless loop", exits(fp.beat_grid, z, z) != "")
-a = fp.pick_slug("song", "id:a")
-check("first song gets its name", a == "song")
-check("same song again reuses it", fp.pick_slug("song", "id:a") == "song")
-check("different song, same name -> song-2", fp.pick_slug("song", "id:b") == "song-2")
+signal.alarm(0)
+
+# a dropped file: copied into songs/, the upload itself stays put (so a retry still finds it)
+up = fp.INBOX / "up.wav"; song(up, 30, 1)
+ida = fp.file_identity(up)
+s1 = fp.choose_slug("up", ida)
+t = fp.prepare_wav(s1, up, downloaded=False)
+check("dropped file -> songs/up.wav, upload left in inbox", s1 == "up" and t == fp.SONGS / "up.wav" and up.exists())
+check("same song again reuses its slug", fp.choose_slug("up", ida) == "up")
+other = fp.INBOX / "up-x.wav"; song(other, 30, 2)
+idb = fp.file_identity(other)
+check("different song, same name -> up-2", fp.choose_slug("up", idb) == "up-2")
 (fp.PACKS / "old").mkdir()
-check("a pack with no .source is never reused", fp.pick_slug("old", "id:c") == "old-2")
+check("a pack with no .source is never reused", fp.choose_slug("old", "id:c") == "old-2")
+
+# explicit --slug: refuses another song's slug; --force moves the old audio aside
+msg = exits(fp.choose_slug, "whatever", idb, slug_arg="up")
+check("--slug on another song's slug refused", "already holds another song" in msg)
+s2 = fp.choose_slug("whatever", idb, slug_arg="up", force=True)
+check("--slug --force takes it, old audio kept as .prev",
+      s2 == "up" and not (fp.SONGS / "up.wav").exists() and any(fp.SONGS.glob("up.wav.prev-*"))
+      and (fp.SONGS / "up.source").read_text().strip() == idb)
+
+# 4 runs at once, 4 different songs with the same title -> 4 different slugs
+code = ("import sys; sys.path.insert(0, sys.argv[1] + '/flippack'); import flippack as fp; "
+        "print(fp.choose_slug('race', sys.argv[2]))")
+procs = [subprocess.Popen([sys.executable, "-I", "-c", code, here, f"id:{i}"], stdout=subprocess.PIPE, text=True,
+                          env={**os.environ, "SAMPLER_HOME": str(lib)}) for i in range(4)]
+got = sorted(p.communicate()[0].strip() for p in procs)
+check("4 concurrent songs, one title -> 4 slugs", got == ["race", "race-2", "race-3", "race-4"])
 sys.exit(bad)
 PY
 else

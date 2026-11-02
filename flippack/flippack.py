@@ -4,13 +4,14 @@ chop sets, tempo/key, a section map of the original, and a blank arrangement she
 
 Usage:  flippack.py SOURCE [--slug NAME] [--force]
   SOURCE = https://... (ripped with yt-dlp) | path/to/song.wav | existing slug under stems/
-Output: $SAMPLER_HOME/packs/<slug>/  (stems stay in $SAMPLER_HOME/stems/htdemucs_6s/<slug>/)
+Output: $SAMPLER_HOME/packs/<slug>/  (audio in songs/<slug>.wav, stems in stems/htdemucs_6s/<slug>/)
 SAMPLER_HOME defaults to library/ in this repo.
 
 Section names (intro/verse/hook/break) are GUESSES from which stems play and what repeats;
 bar numbers, times, tempo and the cut points are measured.
 """
 import argparse
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -28,7 +29,10 @@ import soundfile as sf
 
 DEFAULT_HOME = Path(__file__).resolve().parent.parent / "library"
 ROOT = Path(os.environ.get("SAMPLER_HOME") or DEFAULT_HOME)
-INBOX, STEMS_DIR, PACKS = ROOT / "inbox", ROOT / "stems/htdemucs_6s", ROOT / "packs"
+INBOX, DOWNLOADS, SONGS = ROOT / "inbox", ROOT / "downloads", ROOT / "songs"
+STEMS_DIR, PACKS = ROOT / "stems/htdemucs_6s", ROOT / "packs"
+MAX_SECS = 15 * 60             # longer songs take too much memory to analyze (all stems are loaded)
+SLUG_LOCK = None               # fd of the lock on the slug being made; held until exit
 STEMS = ["drums", "bass", "other", "vocals", "guitar", "piano"]
 LABEL = {"drums": "drums", "bass": "bass", "other": "synth/keys", "vocals": "vocal",
          "guitar": "guitar", "piano": "piano"}
@@ -50,14 +54,31 @@ def slugify(title):
 
 
 # ---------- 1. source -> wav -> stems ----------
+#
+# Folders under SAMPLER_HOME, each with one owner so they never collide:
+#   inbox/      dropped files, written only by serve.py; the chopper reads them and never moves them,
+#               so a failed request can be retried from the same file
+#   downloads/  yt-dlp output, one name per process (two runs of one link don't share a file)
+#   songs/      the chopper's audio: <slug>.wav, <slug>.source (which song owns the slug),
+#               .names.lock (taken while choosing a slug), .<slug>.lock (held while making the pack)
+#   stems/, packs/
 
 def check_home():
     # A SAMPLER_HOME that is missing is usually an unplugged drive. Creating it would write the
     # library onto the internal disk under /Volumes, so only the default library is ever created.
     if ROOT != DEFAULT_HOME and not ROOT.is_dir():
         sys.exit(f"SAMPLER_HOME {ROOT} does not exist (is the drive plugged in?)")
-    for d in (INBOX, STEMS_DIR, PACKS):
+    for d in (INBOX, DOWNLOADS, SONGS, STEMS_DIR, PACKS):
         d.mkdir(parents=True, exist_ok=True)
+
+
+def lock(path):
+    """Block until this process holds an exclusive lock on path. The lock lasts until the returned fd
+    is closed or the process exits. Lock files are never deleted: deleting one lets two processes
+    hold 'the same' lock on different files."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
 
 
 def ytdlp_cmd():
@@ -71,24 +92,31 @@ def ytdlp_cmd():
 
 
 def rip(url):
-    """Download to a name keyed by the video's id (two videos with the same title can't collide).
-    Returns (wav path, title, identity)."""
-    # argv list, no shell: the URL is never interpreted by a shell
+    """Download a link's audio. Returns (wav path, title, identity); identity is the site + video id."""
+    # argv list, no shell: the URL is never interpreted by a shell. One JSON line per video, so a
+    # title with a newline in it can't shift the fields.
     r = subprocess.run(ytdlp_cmd() + ["--no-playlist", "-x", "--audio-format", "wav",
-                        "-o", str(INBOX / ".dl-%(extractor_key)s-%(id)s.%(ext)s"),
-                        "--print", "after_move:%(extractor_key)s:%(id)s",
-                        "--print", "after_move:title",
-                        "--print", "after_move:filepath", "--no-simulate", url],
+                        "--match-filter", f"!is_live & duration <? {MAX_SECS}",
+                        "-o", str(DOWNLOADS / f".dl-{os.getpid()}-%(id)s.%(ext)s"),
+                        "--print", "after_move:%(.{extractor_key,id,title,filepath})j",
+                        "--no-simulate", url],
                        capture_output=True, text=True)
     if r.returncode != 0:
         sys.exit(f"yt-dlp failed:\n{r.stderr[-800:]}")
-    out = r.stdout.strip().splitlines()
-    if len(out) < 3:
-        sys.exit(f"yt-dlp printed too little: {r.stdout[-300:]!r}")
-    ident, title, path = out[-3], out[-2], Path(out[-1])
-    if not path.is_file() or path.parent.resolve() != INBOX.resolve():
-        sys.exit(f"yt-dlp reported {path} but it is not in the inbox")
-    return path, title, ident
+    info = None
+    for line in r.stdout.splitlines():
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and obj.get("filepath"):
+            info = obj
+    if info is None:
+        sys.exit(f"yt-dlp downloaded nothing (live streams and videos over {MAX_SECS // 60} minutes are skipped)")
+    path = Path(info["filepath"])
+    if not path.is_file() or path.parent.resolve() != DOWNLOADS.resolve():
+        sys.exit(f"yt-dlp reported {path} but it is not in downloads/")
+    return path, str(info.get("title") or "untitled"), f"{info.get('extractor_key')}:{info.get('id')}"
 
 
 def file_identity(path):
@@ -99,95 +127,144 @@ def file_identity(path):
     return "sha256:" + h.hexdigest()
 
 
-def pick_slug(base, ident):
-    """The first of base, base-2, base-3 ... that is free or already belongs to this same song.
-    inbox/<slug>.source records which song a slug belongs to, so a different song whose title or
-    file name makes the same slug gets its own name instead of reusing the first song's audio,
-    stems and pack. A slug with files but no .source (made before this existed, or by hand) is
-    never reused."""
-    for k in range(1, 1000):
-        slug = base if k == 1 else f"{base[:75]}-{k}"
-        marker = INBOX / f"{slug}.source"
-        if marker.exists():
-            if marker.read_text().strip() == ident:
-                return slug
-            continue
-        if any(os.path.lexists(x) for x in (INBOX / f"{slug}.wav", STEMS_DIR / slug, PACKS / slug)):
-            continue
-        try:
-            # O_EXCL: two runs at once can't both claim the same free slug
-            fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-        except FileExistsError:
-            if marker.read_text().strip() == ident:
-                return slug
-            continue
-        with os.fdopen(fd, "w") as f:
-            f.write(ident + "\n")
-        return slug
-    sys.exit(f"no free name for {base}")
+def taken(slug, ident):
+    # inbox/<slug>.wav: libraries made before songs/ existed kept the song there. Today inbox/ also
+    # holds the upload being chopped, and that file must not block its own name, so it counts only
+    # when it is a different song.
+    if any(os.path.lexists(x) for x in (SONGS / f"{slug}.wav", STEMS_DIR / slug, PACKS / slug)):
+        return True
+    old = INBOX / f"{slug}.wav"
+    return os.path.lexists(old) and not (old.is_file() and file_identity(old) == ident)
+
+
+def choose_slug(title, ident, slug_arg=None, force=False):
+    """Which slug this song's files live under. songs/<slug>.source records the song that owns a
+    slug, so a different song whose title or file name makes the same slug gets base-2, base-3 ...
+    instead of the first song's audio, stems and pack. A slug with files but no .source (made before
+    this existed, or by hand) is never reused automatically. All of it runs under one lock, so a
+    .source is never read half-written and two runs can't claim the same free slug."""
+    fd = lock(SONGS / ".names.lock")
+    try:
+        if slug_arg:
+            marker = SONGS / f"{slug_arg}.source"
+            if marker.exists() and marker.read_text().strip() == ident:
+                return slug_arg
+            if marker.exists() or taken(slug_arg, ident):
+                if not force:
+                    sys.exit(f"{slug_arg} already holds another song; pass --force to replace it "
+                             "(the old audio and stems are kept, renamed)")
+                stamp = time.strftime("%Y%m%d-%H%M%S")
+                for p in (SONGS / f"{slug_arg}.wav", STEMS_DIR / slug_arg):
+                    if os.path.lexists(p):
+                        p.rename(p.with_name(f"{p.name}.prev-{stamp}"))
+            marker.write_text(ident + "\n")
+            return slug_arg
+        base = slugify(title)
+        for k in range(1, 1000):
+            slug = base if k == 1 else f"{base[:75]}-{k}"
+            marker = SONGS / f"{slug}.source"
+            if marker.exists():
+                if marker.read_text().strip() == ident:
+                    return slug
+                continue
+            if taken(slug, ident):
+                continue
+            marker.write_text(ident + "\n")
+            return slug
+        sys.exit(f"no free name for {base}")
+    finally:
+        os.close(fd)
 
 
 def check_audio(path):
-    # before demucs (minutes of work): refuse audio that can't make an 8-bar loop
+    # before demucs (minutes of work): refuse audio that can't make an 8-bar loop. Reads in blocks
+    # so a long file can't fill memory just to be rejected.
     try:
-        data, sr = sf.read(str(path), dtype="float32", always_2d=True)
-    except Exception as e:
+        info = sf.info(str(path))
+        secs = info.frames / info.samplerate if info.samplerate else 0
+        if secs < 20:
+            sys.exit(f"{path.name} is {secs:.1f} s long; a song needs at least 20 s to make loops")
+        if secs > MAX_SECS:
+            sys.exit(f"{path.name} is {secs / 60:.0f} minutes long; the limit is {MAX_SECS // 60}")
+        peak = 0.0
+        for b in sf.blocks(str(path), blocksize=1 << 16, dtype="float32", always_2d=True):
+            if not np.isfinite(b).all():
+                sys.exit(f"{path.name} has broken samples")
+            peak = max(peak, float(np.abs(b).max()))
+    except sf.LibsndfileError as e:
         sys.exit(f"could not read {path.name} as audio: {e}")
-    secs = len(data) / sr if sr else 0
-    if secs < 20:
-        sys.exit(f"{path.name} is {secs:.1f} s long; a song needs at least 20 s to make loops")
-    if not np.isfinite(data).all() or float(np.max(np.abs(data))) < 1e-3:
+    if peak < 1e-3:
         sys.exit(f"{path.name} is silent")
 
 
-def get_stems(source, slug_arg):
-    if re.match(r"^https?://", source):
-        log("ripping audio")
-        wav, title, ident = rip(source)
-    elif Path(source).is_file():
-        wav = Path(source)
-        title, ident = wav.stem, None
-    elif SLUG_RE.match(source) and (STEMS_DIR / source).is_dir():
-        return source, STEMS_DIR / source, None
+def prepare_wav(slug, src, downloaded):
+    """songs/<slug>.wav from the source. An uploaded file in inbox/ is copied or converted, never
+    moved. The caller holds this slug's lock."""
+    target = SONGS / f"{slug}.wav"
+    if target.exists():
+        log(f"songs/ already has {target.name}; using it")
     else:
-        sys.exit(f"SOURCE is not a URL, a file, or a slug with stems: {source}")
-    if slug_arg:
-        slug = slug_arg         # an explicit --slug is used as given (with --force to rebuild)
-    else:
-        slug = pick_slug(slugify(title), ident or file_identity(wav))
-    if not SLUG_RE.match(slug):
-        sys.exit(f"bad slug {slug!r}: use lowercase letters, digits and dashes")
-    target = INBOX / f"{slug}.wav"
-    if wav.resolve() != target.resolve():
-        if target.exists():
-            log(f"inbox already has {target.name}; using it")
-            if wav.parent.resolve() == INBOX.resolve() and wav.name.startswith(".dl-"):
-                wav.unlink()    # the fresh download of the same song is a duplicate
-        elif wav.suffix.lower() != ".wav":
+        # a temp name first: a failed run must not leave a half file a retry would trust
+        tmp = SONGS / f".{slug}.{os.getpid()}.wav"
+        if src.suffix.lower() == ".wav":
+            shutil.copyfile(src, tmp)
+        else:
             # mp3/m4a/flac/aiff: decode to wav once so every later step reads the same file
-            log(f"converting {wav.name} to wav")
-            # into a temp name first: a failed run must not leave a half file a retry would trust
-            tmp = target.with_name(f".{target.stem}.converting.wav")
-            r = subprocess.run(["ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-i", str(wav),
+            log(f"converting {src.name} to wav")
+            r = subprocess.run(["ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-i", str(src),
                                 "-ac", "2", "-ar", "44100", str(tmp)])
             if r.returncode != 0:
                 tmp.unlink(missing_ok=True)
-                sys.exit(f"ffmpeg could not read {wav.name}")
-            tmp.replace(target)
-        else:
-            shutil.copy2(wav, target) if wav.parent.resolve() != INBOX.resolve() else wav.rename(target)
+                sys.exit(f"ffmpeg could not read {src.name}")
+        tmp.replace(target)
+    if downloaded:
+        src.unlink()            # downloads/ is scratch; the song now lives in songs/
     check_audio(target)
+    return target
+
+
+def separate(slug, target):
     sdir = STEMS_DIR / slug
     if all((sdir / f"{s}.wav").exists() for s in STEMS):
         log(f"stems already exist for {slug}; skipping separation")
+        return sdir
+    log("separating stems with demucs htdemucs_6s (a few minutes)")
+    # demucs from the same Python that runs this script, so any venv works. It names the output
+    # folder after the input file's name, which is songs/<slug>.wav -> stems/htdemucs_6s/<slug>/.
+    r = subprocess.run([sys.executable, "-m", "demucs", "-n", "htdemucs_6s",
+                        "-o", str(ROOT / "stems"), str(target)])
+    if r.returncode != 0 or not all((sdir / f"{s}.wav").exists() for s in STEMS):
+        sys.exit("demucs failed; see output above")
+    return sdir
+
+
+def get_stems(source, slug_arg, force):
+    """-> (slug, stems dir, full-mix wav or None). Holds the slug's lock from here to process exit,
+    so two runs of the same song take turns instead of writing the same files."""
+    global SLUG_LOCK
+    if re.match(r"^https?://", source):
+        log("ripping audio")
+        src, title, ident = rip(source)
+        downloaded = True
+    elif Path(source).is_file():
+        src, downloaded = Path(source), False
+        title, ident = src.stem, file_identity(src)
+    elif SLUG_RE.match(source) and (STEMS_DIR / source).is_dir():
+        SLUG_LOCK = lock(SONGS / f".{source}.lock")
+        mix = next((p for p in (SONGS / f"{source}.wav", INBOX / f"{source}.wav") if p.exists()), None)
+        return source, STEMS_DIR / source, mix
     else:
-        log("separating stems with demucs htdemucs_6s (a few minutes)")
-        # demucs from the same Python that runs this script, so any venv works
-        r = subprocess.run([sys.executable, "-m", "demucs", "-n", "htdemucs_6s",
-                            "-o", str(ROOT / "stems"), str(target)])
-        if r.returncode != 0 or not all((sdir / f"{s}.wav").exists() for s in STEMS):
-            sys.exit("demucs failed; see output above")
-    return slug, sdir, target
+        sys.exit(f"SOURCE is not a URL, a file, or a slug with stems: {source}")
+    slug = choose_slug(title, ident, slug_arg, force)
+    if not SLUG_RE.match(slug):
+        sys.exit(f"bad slug {slug!r}: use lowercase letters, digits and dashes")
+    SLUG_LOCK = lock(SONGS / f".{slug}.lock")
+    if (PACKS / slug).exists() and not force:
+        if downloaded:
+            src.unlink()
+        sys.exit(f"{PACKS / slug} exists; pass --force to rebuild (the old one is kept, renamed)")
+    target = prepare_wav(slug, src, downloaded)
+    return slug, separate(slug, target), target
 
 
 # ---------- 2. analysis ----------
@@ -439,10 +516,7 @@ def main():
         sys.exit("--slug: lowercase letters, digits and dashes only")
     check_home()
 
-    slug, sdir, mixwav = get_stems(args.source, args.slug)
-    if mixwav is None:
-        cand = INBOX / f"{slug}.wav"
-        mixwav = cand if cand.exists() else None
+    slug, sdir, mixwav = get_stems(args.source, args.slug, args.force)
     out = PACKS / slug
     if out.exists() and not args.force:
         sys.exit(f"{out} exists; pass --force to rebuild (the old one is kept, renamed)")

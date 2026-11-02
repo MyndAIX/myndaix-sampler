@@ -73,5 +73,5 @@ In `state`, each hit says who made it (`you` = the person, `ai` = you) and how (
 | `flip.sh` | runs the chopper in `.venv` (`vs.py run` calls it) |
 | `setup.sh`, `run.sh`, `config.sh` | setup, start, shared settings |
 | `test.sh` | fast server check (~3 s, no songs needed); run it after changing `serve.py` or `vs.py` |
-| `library/` | made on this machine: `inbox/` songs, `stems/`, `packs/`, `requests.json` |
+| `library/` | made on this machine: `inbox/` dropped files, `downloads/`, `songs/` (the chopper's audio), `stems/`, `packs/`, `requests.json` |
 | `local.env` | optional, not committed: `SAMPLER_HOME=` to keep the library elsewhere, `VS_VENV=` for another venv |
