@@ -5,7 +5,8 @@ at the same time (switch banks, hit pads, change pitch, load packs, put messages
 plays flip packs made by `/Volumes/Crucial Media/sampler/flippack/flippack.sh`.
 
 Two decks, left and right, 16 pads each. Each deck loads its own pack and bank and has its own
-pitch.
+pitch, and a waveform screen showing the last sample hit: the played part turns orange behind a
+playhead, and a loop shows which of its bars is playing.
 
 v0 prototype, built 2026-11-01. Not reviewed. Run the full /feature pipeline before it grows into a
 product.
