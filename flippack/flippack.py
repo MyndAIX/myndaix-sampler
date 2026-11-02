@@ -142,7 +142,9 @@ def choose_slug(title, ident, slug_arg=None, force=False):
     slug, so a different song whose title or file name makes the same slug gets base-2, base-3 ...
     instead of the first song's audio, stems and pack. A slug with files but no .source (made before
     this existed, or by hand) is never reused automatically. All of it runs under one lock, so a
-    .source is never read half-written and two runs can't claim the same free slug."""
+    .source is never read half-written and two runs can't claim the same free slug. With slug_arg and
+    force this renames another song's files, so the caller must already hold that slug's lock
+    (claim_slug does)."""
     fd = lock(SONGS / ".names.lock")
     try:
         if slug_arg:
@@ -152,9 +154,11 @@ def choose_slug(title, ident, slug_arg=None, force=False):
             if marker.exists() or taken(slug_arg, ident):
                 if not force:
                     sys.exit(f"{slug_arg} already holds another song; pass --force to replace it "
-                             "(the old audio and stems are kept, renamed)")
+                             "(the old audio, stems and pack are kept, renamed)")
                 stamp = time.strftime("%Y%m%d-%H%M%S")
-                for p in (SONGS / f"{slug_arg}.wav", STEMS_DIR / slug_arg):
+                # the pack moves too: if B's run then fails, a retry of B must not find A's pack
+                # under B's .source and load it as B
+                for p in (SONGS / f"{slug_arg}.wav", STEMS_DIR / slug_arg, PACKS / slug_arg):
                     if os.path.lexists(p):
                         p.rename(p.with_name(f"{p.name}.prev-{stamp}"))
             marker.write_text(ident + "\n")
@@ -174,6 +178,34 @@ def choose_slug(title, ident, slug_arg=None, force=False):
         sys.exit(f"no free name for {base}")
     finally:
         os.close(fd)
+
+
+def owner(slug):
+    fd = lock(SONGS / ".names.lock")      # .source is written under this lock; read it the same way
+    try:
+        m = SONGS / f"{slug}.source"
+        return m.read_text().strip() if m.exists() else None
+    finally:
+        os.close(fd)
+
+
+def claim_slug(title, ident, slug_arg=None, force=False):
+    """-> slug, with this process holding the slug's lock until exit. Lock order is always slug
+    lock, then names lock (choose_slug drops the names lock before anyone takes a slug lock), so
+    two runs can't deadlock."""
+    global SLUG_LOCK
+    if slug_arg:
+        if not SLUG_RE.match(slug_arg):
+            sys.exit("--slug: lowercase letters, digits and dashes only")
+        # before choose_slug: a --force replacement renames files a running chop may be reading
+        SLUG_LOCK = lock(SONGS / f".{slug_arg}.lock")
+        return choose_slug(title, ident, slug_arg, force)
+    slug = choose_slug(title, ident)
+    SLUG_LOCK = lock(SONGS / f".{slug}.lock")
+    # between choosing and locking, a --slug --force run may have given this slug to another song
+    if owner(slug) != ident:
+        sys.exit(f"{slug} was given to another song while this run waited; run it again")
+    return slug
 
 
 def check_audio(path):
@@ -255,10 +287,9 @@ def get_stems(source, slug_arg, force):
         return source, STEMS_DIR / source, mix
     else:
         sys.exit(f"SOURCE is not a URL, a file, or a slug with stems: {source}")
-    slug = choose_slug(title, ident, slug_arg, force)
+    slug = claim_slug(title, ident, slug_arg, force)
     if not SLUG_RE.match(slug):
         sys.exit(f"bad slug {slug!r}: use lowercase letters, digits and dashes")
-    SLUG_LOCK = lock(SONGS / f".{slug}.lock")
     if (PACKS / slug).exists() and not force:
         if downloaded:
             src.unlink()

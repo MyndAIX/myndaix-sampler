@@ -211,6 +211,47 @@ procs = [subprocess.Popen([sys.executable, "-I", "-c", code, here, f"id:{i}"], s
                           env={**os.environ, "SAMPLER_HOME": str(lib)}) for i in range(4)]
 got = sorted(p.communicate()[0].strip() for p in procs)
 check("4 concurrent songs, one title -> 4 slugs", got == ["race", "race-2", "race-3", "race-4"])
+
+# a forced replacement moves the old pack aside too, so a failed replacement + retry can't load it
+(fp.PACKS / "up").mkdir()
+fp.choose_slug("whatever", "id:new", slug_arg="up", force=True)
+check("--force moves the old pack aside", not (fp.PACKS / "up").exists() and any(fp.PACKS.glob("up.prev-*")))
+
+# a process holding a slug's lock stands in for a chop that is running on it
+import time
+HOLD = ("import fcntl, os, sys; fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT); "
+        "fcntl.flock(fd, fcntl.LOCK_EX); print('held', flush=True); sys.stdin.read()")
+def holder(slug):
+    h = subprocess.Popen([sys.executable, "-I", "-c", HOLD, str(fp.SONGS / f".{slug}.lock")],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    h.stdout.readline()
+    return h
+CLAIM = ("import sys; sys.path.insert(0, sys.argv[1] + '/flippack'); import flippack as fp; "
+         "print(fp.claim_slug(sys.argv[2], sys.argv[3], sys.argv[4] or None, sys.argv[5] == '1'))")
+def claim(title, ident, slug_arg="", force=False):
+    return subprocess.Popen([sys.executable, "-I", "-c", CLAIM, here, title, ident, slug_arg, "1" if force else "0"],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            env={**os.environ, "SAMPLER_HOME": str(lib)})
+
+# --slug --force waits for the running chop instead of moving its files mid-run
+song(fp.SONGS / "up.wav", 30, 3)
+h = holder("up")
+b = claim("x", "id:z", "up", True)
+time.sleep(1.5)
+check("--force waits while a chop holds the slug", b.poll() is None and (fp.SONGS / "up.wav").exists())
+h.stdin.close(); h.wait()
+out, _ = b.communicate(timeout=30)
+check("... then replaces it", out.strip() == "up" and not (fp.SONGS / "up.wav").exists()
+      and (fp.SONGS / "up.source").read_text().strip() == "id:z")
+
+# a run that chose a slug, then lost it to a --force run before getting the lock, stops
+h = holder("race")
+c = claim("race", "id:0")
+time.sleep(1.5)
+(fp.SONGS / "race.source").write_text("id:someone-else\n")
+h.stdin.close(); h.wait()
+_, err = c.communicate(timeout=30)
+check("slug taken by --force while waiting -> stops", c.returncode != 0 and "given to another song" in err)
 sys.exit(bad)
 PY
 else
