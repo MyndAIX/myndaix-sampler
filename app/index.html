@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Virtual Sampler</title>
+<link rel="icon" href="data:,">
+<!-- data: icon stops the browser's favicon.ico request (a 404 in the console otherwise) -->
+
+<style>
+  :root { --bg:#111214; --panel:#1b1d21; --pad:#2a2d33; --pad-hi:#ff7a1a; --loop-on:#2fbf71;
+          --text:#e8e8ea; --dim:#8a8d94; --line:#33363d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.4 -apple-system, system-ui, sans-serif;
+         display:flex; justify-content:center; min-height:100vh; }
+  main { width:min(560px, 100% - 32px); padding:20px 0; }
+  header { display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  h1 { font-size:16px; margin:0; letter-spacing:.04em; }
+  .info { color:var(--dim); font-size:13px; }
+  .screen { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin:12px 0;
+            font-family:ui-monospace, Menlo, monospace; font-size:13px; min-height:64px; }
+  .screen .msg { color:var(--pad-hi); }
+  .banks { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px; }
+  .banks button { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:6px;
+                  padding:6px 10px; cursor:pointer; font:inherit; }
+  .banks button.on { border-color:var(--pad-hi); color:var(--pad-hi); }
+  .grid { display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; }
+  .pad { aspect-ratio:1; background:var(--pad); border-radius:8px; border:1px solid var(--line); position:relative;
+         cursor:pointer; user-select:none; transition:background .08s; display:flex; flex-direction:column;
+         justify-content:space-between; padding:6px; font-size:11px; color:var(--dim); overflow:hidden; }
+  .pad.empty { opacity:.35; cursor:default; }
+  .pad.hit { background:var(--pad-hi); color:#111; }
+  .pad.looping { box-shadow:inset 0 0 0 2px var(--loop-on); }
+  .pad.queued { box-shadow:inset 0 0 0 2px var(--dim); }
+  .pad .n { font-weight:600; }
+  .pad .k { align-self:flex-end; font-family:ui-monospace, Menlo, monospace; }
+  .help { color:var(--dim); font-size:12px; margin-top:12px; }
+  #start { position:fixed; inset:0; background:rgba(0,0,0,.8); display:flex; align-items:center; justify-content:center;
+           font-size:18px; cursor:pointer; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>VIRTUAL SAMPLER</h1>
+    <span class="info" id="info">loading…</span>
+  </header>
+  <div class="screen" id="screen"></div>
+  <div class="banks" id="banks"></div>
+  <div class="grid" id="grid"></div>
+  <p class="help">Keys: rows <b>1 2 3 4</b> / <b>Q W E R</b> / <b>A S D F</b> / <b>Z X C V</b> (Z = pad 1, bottom-left).
+    <b>[ ]</b> change bank, <b>Space</b> stops loops. In the loops bank a pad starts or stops its loop on the next bar.</p>
+</main>
+<div id="start">Click to start the audio</div>
+<script>
+"use strict";
+// Pad 1 is bottom-left, as on Maschine. KEYS[i] plays pad i+1.
+const KEYS = ["z","x","c","v","a","s","d","f","q","w","e","r","1","2","3","4"];
+const BANK_ORDER = ["loops", "synth16", "mix16", "vocal16"];
+
+const ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "interactive" });
+const S = { pack: null, meta: null, banks: {}, bank: null, buffers: {}, loops: {}, clock0: null,
+            hits: [], seq: 0, synced: false, lastMsg: "" };
+window.VS = S;    // test hook
+
+const $ = id => document.getElementById(id);
+const screen = (line) => { S.lastMsg = line; render(); };
+
+async function loadPack(slug) {
+  S.pack = slug; S.buffers = {}; stopAll();
+  const meta = await (await fetch(`/packs/${encodeURIComponent(slug)}/analysis.json`, { cache: "no-store" })).json();
+  S.meta = meta;
+  const banks = {};
+  for (const f of meta.files || []) {
+    const parts = f.split("/");
+    const name = parts[0] === "loops" ? "loops" : parts[0] === "chops" ? parts[1] : null;
+    if (!name) continue;
+    (banks[name] = banks[name] || []).push(f);
+  }
+  for (const k in banks) banks[k].sort().splice(16);
+  S.banks = banks;
+  S.bank = BANK_ORDER.find(b => banks[b]) || Object.keys(banks)[0];
+  render();
+  const all = Object.values(banks).flat();
+  await Promise.all(all.map(async f => {
+    const url = `/packs/${encodeURIComponent(slug)}/` + f.split("/").map(encodeURIComponent).join("/");
+    const ab = await (await fetch(url)).arrayBuffer();
+    S.buffers[f] = await ctx.decodeAudioData(ab);
+  }));
+  screen(`loaded ${all.length} sounds`);
+}
+
+function barLen() { return S.meta ? S.meta.barlen : 2; }
+function nextBar() {
+  const now = ctx.currentTime + 0.02;
+  if (S.clock0 === null) { S.clock0 = now; return now; }
+  return S.clock0 + Math.ceil((now - S.clock0) / barLen()) * barLen();
+}
+
+function flash(i) {
+  const el = $("grid").querySelector(`[data-pad="${i}"]`);
+  if (!el) return;
+  el.classList.add("hit"); setTimeout(() => el.classList.remove("hit"), 110);
+}
+
+function hit(i, who = "you") {
+  const files = S.banks[S.bank] || [];
+  const f = files[i];
+  if (!f || !S.buffers[f]) return;
+  flash(i);
+  S.hits.push({ pad: i + 1, bank: S.bank, who, t: Date.now() }); S.hits.splice(0, S.hits.length - 20);
+  if (S.bank === "loops") return toggleLoop(f);
+  const src = ctx.createBufferSource();
+  src.buffer = S.buffers[f]; src.connect(ctx.destination); src.start();
+  pushState();
+}
+
+function toggleLoop(f) {
+  const at = nextBar();
+  const cur = S.loops[f];
+  if (cur) { cur.src.stop(at); delete S.loops[f]; }
+  else {
+    const src = ctx.createBufferSource();
+    src.buffer = S.buffers[f]; src.loop = true; src.connect(ctx.destination);
+    // join in phase with the 8-bar loops already running
+    const offset = S.clock0 === null ? 0 : ((at - S.clock0) % src.buffer.duration);
+    src.start(at, offset);
+    S.loops[f] = { src, at };
+  }
+  render(); pushState();
+}
+
+function stopAll() {
+  for (const f in S.loops) S.loops[f].src.stop();
+  S.loops = {}; S.clock0 = null; render();
+}
+
+function setBank(name) {
+  if (!S.banks[name]) return;
+  S.bank = name; render(); pushState();
+}
+
+function render() {
+  const m = S.meta;
+  $("info").textContent = m ? `${S.pack} · ${m.bpm.toFixed(2)} BPM` +
+    (m.scale && m.scale.scale ? ` · scale ${m.scale.root} ${m.scale.scale}` : "") : "loading…";
+  $("screen").innerHTML = "";
+  const l1 = document.createElement("div"); l1.textContent = `bank: ${S.bank || "-"}   loops running: ${Object.keys(S.loops).length}`;
+  const l2 = document.createElement("div"); l2.className = "msg"; l2.textContent = S.lastMsg;
+  $("screen").append(l1, l2);
+  $("banks").innerHTML = "";
+  for (const b of Object.keys(S.banks).sort((a, b) => BANK_ORDER.indexOf(a) - BANK_ORDER.indexOf(b))) {
+    const btn = document.createElement("button");
+    btn.textContent = b; btn.className = b === S.bank ? "on" : "";
+    btn.onclick = () => setBank(b);
+    $("banks").append(btn);
+  }
+  const files = S.banks[S.bank] || [];
+  $("grid").innerHTML = "";
+  // draw top row first: pads 13-16, 9-12, 5-8, 1-4
+  for (const row of [3, 2, 1, 0]) for (let c = 0; c < 4; c++) {
+    const i = row * 4 + c, f = files[i];
+    const el = document.createElement("div");
+    el.className = "pad" + (f ? "" : " empty") + (f && S.loops[f] ? " looping" : "");
+    el.dataset.pad = i;
+    const name = f ? f.split("/").pop().replace(/\.wav$/, "") : "";
+    el.innerHTML = `<span class="n">${i + 1}</span><span class="nm"></span><span class="k">${KEYS[i].toUpperCase()}</span>`;
+    el.querySelector(".nm").textContent = name;
+    el.onpointerdown = () => hit(i);
+    $("grid").append(el);
+  }
+}
+
+let stateTimer = null;
+function pushState() {
+  clearTimeout(stateTimer);
+  stateTimer = setTimeout(() => fetch("/state", { method: "POST", headers: { "Content-Type": "application/json", "X-VS": "1" },
+    body: JSON.stringify({ pack: S.pack, bank: S.bank, loops: Object.keys(S.loops), hits: S.hits.slice(-10),
+                           loaded: Object.keys(S.buffers).length, audio: ctx.state }) }).catch(() => {}), 50);
+}
+
+// Mack's commands arrive through the local server's queue
+async function poll() {
+  try {
+    const r = await (await fetch(`/control?after=${S.seq}`, { cache: "no-store" })).json();
+    // first poll: skip commands sent before this page opened
+    if (!S.synced) { S.seq = r.seq; S.synced = true; }
+    else for (const c of r.cmds) {
+      S.seq = Math.max(S.seq, c.seq);
+      if (c.cmd === "bank") { setBank(String(c.name)); screen(`Mack: bank ${c.name}`); }
+      else if (c.cmd === "pad") hit(Number(c.pad) - 1, "mack");
+      else if (c.cmd === "load") { screen(`Mack: loading ${c.pack}`); await loadPack(String(c.pack)); }
+      else if (c.cmd === "stop") { stopAll(); screen("Mack: stop"); }
+      else if (c.cmd === "say") screen(`Mack: ${String(c.text).slice(0, 200)}`);
+    }
+  } catch (e) { /* server restarting; try again */ }
+  setTimeout(poll, 150);
+}
+
+document.addEventListener("keydown", e => {
+  if (e.repeat || e.metaKey || e.ctrlKey) return;
+  const k = e.key.toLowerCase();
+  const i = KEYS.indexOf(k);
+  if (i >= 0) { hit(i); return; }
+  const names = Object.keys(S.banks).sort((a, b) => BANK_ORDER.indexOf(a) - BANK_ORDER.indexOf(b));
+  if (k === "[" || k === "]") {
+    const j = names.indexOf(S.bank) + (k === "]" ? 1 : -1);
+    setBank(names[(j + names.length) % names.length]);
+  }
+  if (k === " ") { e.preventDefault(); stopAll(); pushState(); }
+});
+
+// MIDI pads (e.g. the MK2 in MIDI mode): note 36 = pad 1. Untested on the real hardware.
+if (navigator.requestMIDIAccess) navigator.requestMIDIAccess().then(m => {
+  const bind = inp => inp.onmidimessage = ev => {
+    const [st, note, vel] = ev.data;
+    if ((st & 0xf0) === 0x90 && vel > 0) hit(((note - 36) % 16 + 16) % 16);
+  };
+  m.inputs.forEach(bind);
+  m.onstatechange = e => e.port.type === "input" && e.port.state === "connected" && bind(e.port);
+}).catch(() => {});
+
+$("start").onclick = async () => { await ctx.resume(); $("start").remove(); pushState(); };
+
+(async () => {
+  const want = new URLSearchParams(location.search).get("pack");
+  const { packs } = await (await fetch("/api/packs")).json();
+  const slug = packs.includes(want) ? want : packs[0];
+  if (!slug) { screen("no flip packs found"); return; }
+  await loadPack(slug);
+  pushState();
+  poll();
+})();
+</script>
+</body>
+</html>
