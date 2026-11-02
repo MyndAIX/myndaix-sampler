@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MyndAIX-Sampler</title>
+<link rel="icon" href="data:,">
+<!-- data: icon stops the browser's favicon.ico request (a 404 in the console otherwise) -->
+<style>
+  :root { --bg:#111214; --panel:#1b1d21; --pad:#2a2d33; --hi:#ff7a1a; --loop-on:#2fbf71;
+          --text:#e8e8ea; --dim:#8a8d94; --line:#33363d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.4 -apple-system, system-ui, sans-serif;
+         display:flex; justify-content:center; min-height:100vh; }
+  main { width:min(1120px, 100% - 32px); padding:16px 0; }
+  header { display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  h1 { font-size:16px; margin:0; letter-spacing:.04em; }
+  .screen { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 12px; margin:10px 0;
+            font-family:ui-monospace, Menlo, monospace; font-size:13px; color:var(--hi); min-height:36px; }
+  .decks { display:grid; grid-template-columns:1fr 1fr; gap:24px; }
+  @media (max-width: 760px) { .decks { grid-template-columns:1fr; } }
+  .deck { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .deck h2 { font-size:13px; margin:0 0 8px; color:var(--dim); font-weight:600; display:flex; justify-content:space-between; gap:8px; }
+  .deck select { background:var(--pad); color:var(--text); border:1px solid var(--line); border-radius:6px; font:inherit;
+                 font-size:12px; max-width:60%; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; align-items:center; }
+  button { background:var(--pad); color:var(--text); border:1px solid var(--line); border-radius:6px;
+           padding:5px 9px; cursor:pointer; font:inherit; font-size:12px; }
+  button.on { border-color:var(--hi); color:var(--hi); }
+  button:disabled { opacity:.3; cursor:default; }
+  button .fk { color:var(--dim); font-family:ui-monospace, Menlo, monospace; margin-right:4px; }
+  .pitch { margin-left:auto; display:flex; gap:4px; align-items:center; font-family:ui-monospace, Menlo, monospace; font-size:12px; }
+  .pitch .val { min-width:92px; text-align:center; }
+  .add { display:flex; gap:6px; margin:10px 0; flex-wrap:wrap; }
+  .add input { flex:1; min-width:220px; background:var(--panel); color:var(--text); border:1px solid var(--line);
+               border-radius:6px; padding:7px 10px; font:inherit; }
+  .add select { background:var(--pad); color:var(--text); border:1px solid var(--line); border-radius:6px; font:inherit; }
+  .reqs { color:var(--dim); font-size:12px; margin:-4px 0 10px; }
+  .reqs .working { color:var(--hi); } .reqs .done { color:var(--loop-on); } .reqs .failed { color:#e05555; }
+  .deck.drop { box-shadow:0 0 0 2px var(--hi); }
+  .welcome { grid-column:1 / -1; text-align:center; padding:28px 12px; color:var(--dim); font-size:15px; line-height:1.7; }
+  .welcome b { color:var(--text); }
+  .wave { display:block; width:100%; height:76px; background:#0c0d0f; border:1px solid var(--line); border-radius:6px;
+          margin-bottom:10px; }
+  .grid { display:grid; grid-template-columns:repeat(4, 1fr); gap:7px; }
+  .pad { aspect-ratio:1; background:var(--pad); border-radius:8px; border:1px solid var(--line); cursor:pointer;
+         user-select:none; transition:background .08s; display:flex; flex-direction:column; justify-content:space-between;
+         padding:6px; font-size:11px; color:var(--dim); overflow:hidden; }
+  .pad.empty { opacity:.35; cursor:default; }
+  .pad.hit { background:var(--hi); color:#111; }
+  .pad.looping { box-shadow:inset 0 0 0 2px var(--loop-on); }
+  .pad .n { font-weight:600; }
+  .pad .k { align-self:flex-end; font-family:ui-monospace, Menlo, monospace; }
+  .help { color:var(--dim); font-size:12px; margin-top:12px; line-height:1.6; }
+  .help b { color:var(--text); }
+  #start { position:fixed; inset:0; background:rgba(0,0,0,.8); display:flex; align-items:center; justify-content:center;
+           font-size:18px; cursor:pointer; }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>MYNDAIX-SAMPLER</h1><span class="help" style="margin:0">Space stops all loops</span></header>
+  <div class="screen" id="screen"></div>
+  <form class="add" id="add">
+    <input id="link" type="url" placeholder="Paste a YouTube link to chop a song onto the pads (or drop an audio file on a deck)" autocomplete="off">
+    <select id="linkdeck" aria-label="deck"><option value="L">left deck</option><option value="R">right deck</option></select>
+    <button type="submit">Add song</button>
+  </form>
+  <div class="reqs" id="reqs"></div>
+  <div class="decks">
+    <section class="deck" id="deck-L"></section>
+    <section class="deck" id="deck-R"></section>
+  </div>
+  <p class="help">
+    <b>Left pads:</b> 1 2 3 4 / Q W E R / A S D F / Z X C V &nbsp;·&nbsp; banks <b>F1–F4</b> &nbsp;·&nbsp; pitch <b>G</b> up, <b>B</b> down, <b>T</b> reset<br>
+    <b>Right pads:</b> 7 8 9 0 / U I O P / J K L ; / M , . / &nbsp;·&nbsp; banks <b>F5–F8</b> &nbsp;·&nbsp; pitch <b>H</b> up, <b>N</b> down, <b>Y</b> reset<br>
+    Pad 1 is bottom-left on each side. On a Mac keyboard hold <b>fn</b> with the F-keys (unless your F-keys are set to standard).
+    Pitch moves speed and pitch together, one semitone a step, like a classic sampler. In the loops bank a pad starts or stops its loop on the next bar.
+  </p>
+</main>
+<div id="start">Click to start the audio</div>
+<script>
+"use strict";
+const BANK_ORDER = ["loops", "synth16", "mix16", "vocal16"];
+// Pad 1 is bottom-left, as on Maschine. keys[i] plays pad i+1.
+const DECKS = {
+  L: { keys: ["z","x","c","v","a","s","d","f","q","w","e","r","1","2","3","4"], fkeys: ["F1","F2","F3","F4"],
+       up: "g", down: "b", reset: "t", defaultBank: "loops" },
+  R: { keys: ["m",",",".","/","j","k","l",";","u","i","o","p","7","8","9","0"], fkeys: ["F5","F6","F7","F8"],
+       up: "h", down: "n", reset: "y", defaultBank: "synth16" },
+};
+for (const id in DECKS) Object.assign(DECKS[id], { id, pack: null, meta: null, banks: {}, bank: null,
+                                                   loops: {}, clock0: null, semis: 0, view: null, canvas: null });
+
+const ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "interactive" });
+const cache = {};          // "pack/file" -> AudioBuffer, shared so both decks on one pack decode once
+const S = { decks: DECKS, packs: [], hits: [], seq: 0, synced: false, cache };
+window.VS = S;             // test hook
+const $ = id => document.getElementById(id);
+const say = t => { $("screen").textContent = t; };
+const rate = d => Math.pow(2, d.semis / 12);
+
+async function loadPack(d, slug) {
+  stopLoops(d);
+  d.pack = slug;
+  const meta = await (await fetch(`/packs/${encodeURIComponent(slug)}/analysis.json`, { cache: "no-store" })).json();
+  const banks = {};
+  for (const f of meta.files || []) {
+    const p = f.split("/");
+    const name = p[0] === "loops" ? "loops" : p[0] === "chops" ? p[1] : null;
+    if (name) (banks[name] = banks[name] || []).push(f);
+  }
+  for (const k in banks) banks[k].sort().splice(16);
+  d.meta = meta; d.banks = banks;
+  d.bank = banks[d.bank] ? d.bank : (banks[d.defaultBank] ? d.defaultBank : BANK_ORDER.find(b => banks[b]));
+  renderDeck(d);
+  await Promise.all(Object.values(banks).flat().map(async f => {
+    const key = slug + "/" + f;
+    if (cache[key]) return;
+    const url = `/packs/${encodeURIComponent(slug)}/` + f.split("/").map(encodeURIComponent).join("/");
+    cache[key] = await ctx.decodeAudioData(await (await fetch(url)).arrayBuffer());
+  }));
+  renderDeck(d);
+}
+
+function buf(d, f) { return cache[d.pack + "/" + f]; }
+
+// Bar clock per deck, in real seconds; at a changed pitch the bar is shorter or longer
+function barSec(d) { return (d.meta ? d.meta.barlen : 2) / rate(d); }
+function nextBar(d) {
+  const now = ctx.currentTime + 0.02;
+  if (d.clock0 === null || Object.keys(d.loops).length === 0) { d.clock0 = now; return now; }
+  return d.clock0 + Math.ceil((now - d.clock0) / barSec(d) - 1e-6) * barSec(d);
+}
+
+function flash(d, i) {
+  const el = $(`deck-${d.id}`).querySelector(`[data-pad="${i}"]`);
+  if (el) { el.classList.add("hit"); setTimeout(() => el.classList.remove("hit"), 110); }
+}
+
+function hit(d, i, who = "you", via = "") {
+  const f = (d.banks[d.bank] || [])[i];
+  if (!f || !buf(d, f)) return;
+  flash(d, i);
+  S.hits.push({ deck: d.id, pad: i + 1, bank: d.bank, who, via, t: Date.now() }); S.hits.splice(0, S.hits.length - 20);
+  if (d.bank === "loops") toggleLoop(d, f);
+  else {
+    const src = ctx.createBufferSource();
+    src.buffer = buf(d, f); src.playbackRate.value = rate(d); src.connect(ctx.destination); src.start();
+    d.view = { f, b: src.buffer, name: `${i + 1} · ${nm(f)}`, loop: false, at: ctx.currentTime, r: rate(d) };
+  }
+  pushState();
+}
+
+function toggleLoop(d, f) {
+  const cur = d.loops[f];
+  if (cur) {
+    const stopAt = nextBar(d);
+    cur.src.stop(stopAt); delete d.loops[f];
+    // keep drawing it until it actually stops on the bar line
+    if (d.view && d.view.loop && d.view.f === f) d.view.until = stopAt;
+  } else {
+    const at = nextBar(d);
+    const src = ctx.createBufferSource();
+    src.buffer = buf(d, f); src.loop = true; src.playbackRate.value = rate(d); src.connect(ctx.destination);
+    // join in phase with the deck's loops already running (all 8 bars long)
+    const offset = (((at - d.clock0) * rate(d)) % src.buffer.duration + src.buffer.duration) % src.buffer.duration;
+    src.start(at, offset);
+    d.loops[f] = { src, at };
+    d.view = { f, b: src.buffer, name: nm(f), loop: true, at };
+  }
+  renderDeck(d);
+}
+
+function stopLoops(d) {
+  for (const f in d.loops) d.loops[f].src.stop();
+  d.loops = {}; d.clock0 = null;
+  if (d.view && d.view.loop) d.view.idle = true;
+  if (d.meta) renderDeck(d);
+}
+
+// ---- waveform screen: the sample last hit on the deck, played part in orange, white playhead ----
+const nm = f => f.split("/").pop().replace(/\.wav$/, "");
+const peakCache = new WeakMap();   // AudioBuffer -> { n, p: [min,max] per column, norm }
+function peaks(b, n) {
+  const m = peakCache.get(b);
+  if (m && m.n === n) return m;
+  const chs = []; for (let c = 0; c < b.numberOfChannels; c++) chs.push(b.getChannelData(c));
+  const p = new Float32Array(n * 2), len = b.length;
+  let norm = 1e-4;
+  for (let x = 0; x < n; x++) {
+    let lo = 0, hi = 0;
+    for (let i = Math.floor(x * len / n), e = Math.min(len, Math.floor((x + 1) * len / n)); i < e; i++) {
+      let v = 0; for (const ch of chs) v += ch[i];
+      v /= chs.length; if (v < lo) lo = v; if (v > hi) hi = v;
+    }
+    p[2 * x] = lo; p[2 * x + 1] = hi; norm = Math.max(norm, -lo, hi);
+  }
+  const out = { n, p, norm };      // norm: scale each sample to fill the screen, so quiet chops still show
+  peakCache.set(b, out);
+  return out;
+}
+const css = getComputedStyle(document.documentElement);
+const C = { hi: css.getPropertyValue("--hi").trim(), text: css.getPropertyValue("--text").trim(),
+            dim: css.getPropertyValue("--dim").trim(), wave: "#6b6f78", idle: "#4a4d55" };
+
+function drawDeck(d) {
+  const cv = d.canvas;
+  if (!cv || !cv.isConnected) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = Math.round(cv.clientWidth * dpr), H = Math.round(cv.clientHeight * dpr);
+  if (!W || !H) return;
+  if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+  const g = cv.getContext("2d");
+  g.clearRect(0, 0, W, H);
+  g.font = `${11 * dpr}px ui-monospace, Menlo, monospace`;
+  let v = d.view;
+  if (!v) { g.fillStyle = C.dim; g.fillText("hit a pad", 8 * dpr, H / 2 + 4 * dpr); return; }
+  const t = ctx.currentTime;
+  if (v.loop && !v.idle && v.until !== undefined && t >= v.until) {
+    // the shown loop has stopped: show another loop still running, or leave it on screen at rest
+    const other = Object.keys(d.loops).pop();
+    v = d.view = other ? { f: other, b: d.loops[other].src.buffer, name: nm(other), loop: true, at: d.loops[other].at }
+                       : { ...v, idle: true };
+  }
+  const dur = v.b.duration;
+  let pos = null, label = v.name;
+  if (v.loop && !v.idle) {
+    if (t >= v.at && d.clock0 !== null) {
+      // same phase formula the loops start with, so the playhead matches what is heard
+      pos = (((t - d.clock0) * rate(d)) % dur + dur) % dur;
+      const bl = d.meta.barlen;
+      label += `  ·  bar ${Math.floor(pos / bl) + 1}/${Math.round(dur / bl)}`;
+    } else label += "  ·  starts on the bar";
+  } else if (!v.loop) {
+    const e = (t - v.at) * v.r;
+    if (e < dur) pos = e;
+  }
+  const n = Math.max(1, Math.floor(W / dpr));           // one column per CSS pixel
+  const { p, norm } = peaks(v.b, n);
+  const px = pos === null ? -1 : pos / dur * n;
+  const mid = H / 2, amp = (H / 2 - 3 * dpr) / norm;
+  for (let x = 0; x < n; x++) {
+    g.fillStyle = x < px ? C.hi : (pos === null ? C.idle : C.wave);
+    const y0 = mid - p[2 * x + 1] * amp, y1 = mid - p[2 * x] * amp;
+    g.fillRect(x * dpr, y0, dpr, Math.max(dpr, y1 - y0));
+  }
+  if (pos !== null) { g.fillStyle = C.text; g.fillRect(Math.floor(px * dpr), 0, Math.max(1, Math.round(dpr)), H); }
+  const tw = g.measureText(label).width;
+  g.fillStyle = "rgba(12,13,15,.75)"; g.fillRect(3 * dpr, 3 * dpr, tw + 8 * dpr, 15 * dpr);
+  g.fillStyle = C.text; g.fillText(label, 7 * dpr, 14 * dpr);
+}
+(function frame() { Object.values(DECKS).forEach(drawDeck); requestAnimationFrame(frame); })();
+
+function setBank(d, name) {
+  if (!d.banks[name]) return;
+  d.bank = name; renderDeck(d); pushState();
+}
+
+function setPitch(d, semis) {
+  semis = Math.max(-12, Math.min(12, Math.round(semis)));
+  // keep running loops on their bar grid: re-anchor the clock so "bars elapsed" is unchanged
+  const now = ctx.currentTime;
+  if (d.clock0 !== null) d.clock0 = now - (now - d.clock0) * rate(d) / Math.pow(2, semis / 12);
+  d.semis = semis;
+  for (const f in d.loops) d.loops[f].src.playbackRate.setValueAtTime(rate(d), now);
+  renderDeck(d); pushState();
+}
+
+function renderDeck(d) {
+  const el = $(`deck-${d.id}`);
+  el.innerHTML = "";
+  const h = document.createElement("h2");
+  const title = document.createElement("span");
+  const bpm = d.meta ? (d.meta.bpm * rate(d)).toFixed(1) : "-";
+  title.textContent = `${d.id === "L" ? "LEFT" : "RIGHT"} · ${bpm} BPM` +
+    (d.meta && d.meta.scale && d.meta.scale.scale && d.semis === 0 ? ` · ${d.meta.scale.root} ${d.meta.scale.scale}` : "");
+  const sel = document.createElement("select");
+  for (const p of S.packs) { const o = document.createElement("option"); o.value = o.textContent = p; o.selected = p === d.pack; sel.append(o); }
+  sel.onchange = () => { loadPack(d, sel.value); sel.blur(); };
+  h.append(title, sel);
+
+  const row = document.createElement("div"); row.className = "row";
+  BANK_ORDER.forEach((b, j) => {
+    const btn = document.createElement("button");
+    btn.innerHTML = `<span class="fk">${d.fkeys[j]}</span>`;
+    btn.append(b);
+    btn.className = b === d.bank ? "on" : "";
+    btn.disabled = !d.banks[b];
+    btn.onclick = () => setBank(d, b);
+    row.append(btn);
+  });
+  const pitch = document.createElement("div"); pitch.className = "pitch";
+  const dn = document.createElement("button"); dn.textContent = "▼"; dn.onclick = () => setPitch(d, d.semis - 1);
+  const val = document.createElement("span"); val.className = "val";
+  val.textContent = `${d.semis > 0 ? "+" : ""}${d.semis} st · ${Math.round(rate(d) * 100)}%`;
+  val.title = "click to reset"; val.style.cursor = "pointer"; val.onclick = () => setPitch(d, 0);
+  const up = document.createElement("button"); up.textContent = "▲"; up.onclick = () => setPitch(d, d.semis + 1);
+  pitch.append(dn, val, up);
+  row.append(pitch);
+
+  const grid = document.createElement("div"); grid.className = "grid";
+  const files = d.banks[d.bank] || [];
+  for (const r of [3, 2, 1, 0]) for (let c = 0; c < 4; c++) {     // top row first: 13-16 ... 1-4
+    const i = r * 4 + c, f = files[i];
+    const p = document.createElement("div");
+    p.className = "pad" + (f ? "" : " empty") + (f && d.loops[f] ? " looping" : "");
+    p.dataset.pad = i;
+    p.innerHTML = `<span class="n">${i + 1}</span><span class="nm"></span><span class="k">${d.keys[i].toUpperCase()}</span>`;
+    p.querySelector(".nm").textContent = f ? f.split("/").pop().replace(/\.wav$/, "") : "";
+    p.onpointerdown = () => hit(d, i, "you", "click");
+    grid.append(p);
+  }
+  const cv = document.createElement("canvas"); cv.className = "wave"; d.canvas = cv;
+  el.append(h, row, cv, grid);
+}
+
+let stateTimer = null;
+function pushState() {
+  clearTimeout(stateTimer);
+  stateTimer = setTimeout(() => fetch("/state", { method: "POST", headers: { "Content-Type": "application/json", "X-VS": "1" },
+    body: JSON.stringify({ audio: ctx.state, loaded: Object.keys(cache).length, hits: S.hits.slice(-10),
+      decks: Object.fromEntries(Object.values(DECKS).map(d => [d.id, { pack: d.pack, bank: d.bank, semis: d.semis,
+                                                                         loops: Object.keys(d.loops) }])) }) }).catch(() => {}), 50);
+}
+
+// The AI agent's commands (vs.py) arrive through the local server's queue
+async function poll() {
+  try {
+    const r = await (await fetch(`/control?after=${S.seq}`, { cache: "no-store" })).json();
+    // first poll: skip commands sent before this page opened
+    if (!S.synced) { S.seq = r.seq; S.synced = true; }
+    else for (const c of r.cmds) {
+      S.seq = Math.max(S.seq, c.seq);
+      const d = DECKS[c.deck] || DECKS.L;
+      if (c.cmd === "bank") { setBank(d, String(c.name)); say(`AI: ${d.id} bank ${c.name}`); }
+      else if (c.cmd === "pad") hit(d, Number(c.pad) - 1, "ai");
+      else if (c.cmd === "pitch") { setPitch(d, Number(c.semis)); say(`AI: ${d.id} pitch ${d.semis}`); }
+      else if (c.cmd === "load") {
+        say(`AI: ${d.id} loading ${c.pack}`);
+        if (!S.packs.includes(c.pack)) await refreshPacks();     // a pack the AI just made
+        if (S.packs.includes(c.pack)) { await loadPack(d, c.pack); renderAll(); }
+      }
+      else if (c.cmd === "stop") { Object.values(DECKS).forEach(stopLoops); say("AI: stop"); }
+      else if (c.cmd === "say") say(`AI: ${String(c.text).slice(0, 200)}`);
+    }
+  } catch (e) { /* server restarting; try again */ }
+  setTimeout(poll, 150);
+}
+
+document.addEventListener("keydown", e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (["SELECT", "INPUT", "TEXTAREA"].includes(e.target.tagName)) return;
+  // F-keys: block the browser's own use (F5 = reload) before anything else
+  for (const d of Object.values(DECKS)) {
+    const j = d.fkeys.indexOf(e.key);
+    if (j >= 0) { e.preventDefault(); if (!e.repeat) setBank(d, BANK_ORDER[j]); return; }
+  }
+  if (e.repeat) return;
+  const k = e.key.toLowerCase();
+  if (k === " ") { e.preventDefault(); Object.values(DECKS).forEach(stopLoops); pushState(); return; }
+  for (const d of Object.values(DECKS)) {
+    const i = d.keys.indexOf(k);
+    if (i >= 0) { e.preventDefault(); hit(d, i, "you", "key"); return; }
+    if (k === d.up) return setPitch(d, d.semis + 1);
+    if (k === d.down) return setPitch(d, d.semis - 1);
+    if (k === d.reset) return setPitch(d, 0);
+  }
+});
+
+// MIDI pads (e.g. the MK2 in MIDI mode): note 36 = left pad 1, 52 = right pad 1. Untested on the real hardware.
+if (navigator.requestMIDIAccess) navigator.requestMIDIAccess().then(m => {
+  const bind = inp => inp.onmidimessage = ev => {
+    const [st, note, vel] = ev.data;
+    if ((st & 0xf0) !== 0x90 || vel === 0 || note < 36 || note > 67) return;
+    hit(note < 52 ? DECKS.L : DECKS.R, (note - 36) % 16, "you", "midi");
+  };
+  m.inputs.forEach(bind);
+  m.onstatechange = e => e.port.type === "input" && e.port.state === "connected" && bind(e.port);
+}).catch(() => {});
+
+async function refreshPacks() {
+  S.packs = (await (await fetch("/api/packs", { cache: "no-store" })).json()).packs;
+}
+function renderAll() {
+  for (const d of Object.values(DECKS)) {
+    if (d.meta) { renderDeck(d); continue; }
+    // empty deck: the welcome text, until a song is chopped onto it
+    const el = $(`deck-${d.id}`);
+    el.innerHTML = `<h2><span>${d.id === "L" ? "LEFT" : "RIGHT"}</span></h2><div class="grid"><div class="welcome">
+      <b>No song on this deck yet.</b><br>Paste a YouTube link above, or drop an audio file here.<br>
+      Then ask your AI to chop it: it follows <b>AGENTS.md</b> in this folder.</div></div>`;
+  }
+}
+
+// ---- adding songs: a link or a dropped file becomes a request; the AI agent chops it ----
+async function postJSON(url, obj) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", "X-VS": "1" }, body: JSON.stringify(obj) });
+  return [r.ok, await r.json().catch(() => ({}))];
+}
+$("add").onsubmit = async e => {
+  e.preventDefault();
+  const url = $("link").value.trim();
+  if (!url) return;
+  const [ok, j] = await postJSON("/requests", { url, deck: $("linkdeck").value });
+  if (ok) { $("link").value = ""; $("link").blur(); say(`Song #${j.request.id} added. Now ask your AI to chop it (AGENTS.md).`); pollRequests(true); }
+  else say(j.error || "could not add that link");
+};
+for (const d of Object.values(DECKS)) {
+  const el = $(`deck-${d.id}`);
+  el.addEventListener("dragover", e => { e.preventDefault(); el.classList.add("drop"); });
+  el.addEventListener("dragleave", () => el.classList.remove("drop"));
+  el.addEventListener("drop", async e => {
+    e.preventDefault(); el.classList.remove("drop");
+    const f = e.dataTransfer.files[0];
+    if (!f) return;
+    say(`Uploading ${f.name}...`);
+    const r = await fetch(`/upload?name=${encodeURIComponent(f.name)}&deck=${d.id}`,
+                          { method: "POST", headers: { "X-VS": "1", "Content-Type": "application/octet-stream" }, body: f });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) { say(`Song #${j.request.id} added. Now ask your AI to chop it (AGENTS.md).`); pollRequests(true); }
+    else say(j.error || "upload failed");
+  });
+}
+let reqTimer = null;
+async function pollRequests(once) {
+  try {
+    const rs = (await (await fetch("/requests", { cache: "no-store" })).json()).requests.slice(-4);
+    const el = $("reqs");
+    el.textContent = "";
+    for (const r of rs) {
+      const span = document.createElement("span");
+      span.className = r.status;
+      const what = r.kind === "link" ? r.src.replace(/^https:\/\/(www\.)?/, "").slice(0, 40) : r.src;
+      span.textContent = `#${r.id} ${what}: ${r.status === "done" ? "on the pads" : r.status}${r.note ? " (" + r.note + ")" : ""}`;
+      el.append(span, document.createTextNode("   "));
+    }
+  } catch (e) { /* server restarting */ }
+  if (!once) { clearTimeout(reqTimer); reqTimer = setTimeout(pollRequests, 1500); }
+}
+
+$("start").onclick = async () => { await ctx.resume(); $("start").remove(); pushState(); };
+
+(async () => {
+  await refreshPacks();
+  if (!S.packs.length) {
+    say("no songs yet");
+    renderAll();
+    poll(); pollRequests();
+    return;
+  }
+  const q = new URLSearchParams(location.search);
+  const pick = w => S.packs.includes(w) ? w : S.packs[0];
+  await Promise.all([loadPack(DECKS.L, pick(q.get("left"))), loadPack(DECKS.R, pick(q.get("right")))]);
+  say("ready");
+  pushState();
+  poll(); pollRequests();
+})();
+</script>
+</body>
+</html>

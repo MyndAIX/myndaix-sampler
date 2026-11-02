@@ -1,0 +1,6 @@
+__pycache__/
+.DS_Store
+# this machine only: settings, the Python environment, songs and packs
+local.env
+.venv/
+library/
