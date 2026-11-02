@@ -1,6 +1,7 @@
 #!/bin/bash
 # Server contract check (~3 s), no songs needed: builds a one-chop fake pack in a temp library,
 # then checks files, path safety, the command queue, state, song requests and uploads.
+# If setup.sh has been run, it also checks the chopper's guards (bad audio, name clashes; ~10 s).
 set -euo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -55,6 +56,20 @@ env = dict(os.environ, VS_URL=B, SAMPLER_HOME=str(lib))
 vs = lambda *a: subprocess.run([sys.executable, "-I", f"{here}/vs.py", *a], capture_output=True, text=True, env=env)
 
 c, b = req("/"); check("app page served", c == 200 and b"Add song" in b)
+
+# other web pages: a DNS-rebinding page sends its own name as Host; a cross-site POST sends its Origin
+EV = {"Host": f"attacker.example:{port}"}
+c, _ = req("/api/packs", headers=EV); check("GET with a foreign Host refused (403)", c == 403)
+c, _ = req("/requests", "POST", b'{"url":"https://x.com/a"}', {**H, **EV}); check("POST with a foreign Host refused (403)", c == 403)
+c, _ = req("/control", "POST", b'{"cmd":"say","text":"x"}', {**H, "Origin": "https://attacker.example"})
+check("POST with a foreign Origin refused (403)", c == 403)
+c, _ = req("/control", "POST", b'{"cmd":"say","text":"x"}', {**H, "Origin": B}); check("POST from the app's own Origin allowed", c == 200)
+c, _ = req("/api/packs", headers={"Host": f"localhost:{port}"}); check("Host localhost allowed", c == 200)
+
+# a symlink under packs/ must not expose what it points to
+secret = lib / "secret"; secret.mkdir(); (secret / "key.txt").write_text("SECRET")
+(lib / "packs" / "leak").symlink_to(secret)
+c, b = req("/packs/leak/key.txt"); check("symlink out of packs/ not served", c == 404 and b"SECRET" not in b)
 c, b = req("/api/packs"); check("packs listed", c == 200 and json.loads(b)["packs"] == ["test-pack"])
 c, b = req("/packs/test-pack/chops/synth16/synth%2001.wav"); check("a chop wav is served", c == 200 and b[:4] == b"RIFF")
 for p in ("/packs/../../../../etc/passwd", "/packs/%2e%2e/%2e%2e/%2e%2e/etc/passwd", "/../../etc/passwd"):
@@ -103,6 +118,70 @@ c, b = req("/upload?name=..%2F..%2Fescape.wav", "POST", b"RIFF", U)
 check("upload name can't leave the inbox", c == 200 and (lib / "inbox" / "escape.wav").exists() and not (lib.parent / "escape.wav").exists())
 c, _ = req("/upload?name=evil.sh", "POST", b"#!/bin/sh", U); check("non-audio upload refused", c == 400)
 c, _ = req("/upload?name=a.wav", "POST", b"RIFF", {"Content-Type": "application/octet-stream"}); check("upload without X-VS refused", c == 403)
+
+# a planted .part symlink must not be written through
+outside = lib / "outside.txt"; outside.write_text("keep")
+(lib / "inbox" / ".trap.wav.part").symlink_to(outside)
+c, b = req("/upload?name=trap.wav", "POST", b"RIFFnew", U)
+check("upload skips a planted .part symlink", c == 200 and outside.read_text() == "keep"
+      and (lib / "inbox" / "trap-2.wav").read_bytes() == b"RIFFnew")
+
+# concurrent uploads of the same name each get their own file, intact
+import threading
+bodies = [f"RIFF-{i}-".encode() * 50000 for i in range(8)]
+threads = [threading.Thread(target=req, args=("/upload?name=Same.wav", "POST", bd, U)) for bd in bodies]
+[t.start() for t in threads]; [t.join() for t in threads]
+got = sorted(f.read_bytes() for f in (lib / "inbox").glob("same*.wav"))
+check("8 concurrent same-name uploads -> 8 intact files", got == sorted(bodies))
+
+# vs.py run with a chopper that fails marks the request failed (no venv here -> flip.sh exits 1)
+c, b = req("/requests", "POST", json.dumps({"url": "https://www.youtube.com/watch?v=zzz"}).encode(), H)
+rid = str(json.loads(b)["request"]["id"])
+out = subprocess.run([sys.executable, "-I", f"{here}/vs.py", "run", rid], capture_output=True, text=True,
+                     env={**env, "VS_VENV": str(lib / "no-venv")})
+st = next(r for r in json.loads(req("/requests")[1])["requests"] if str(r["id"]) == rid)
+check("vs.py run: a failing chopper marks the request failed", out.returncode == 1 and st["status"] == "failed")
 sys.exit(bad)
 PY
+
+# the chopper's guards, only if setup.sh has made the Python environment
+VENV_PY="$(bash -c '. "$1/config.sh"; echo "$VS_VENV/bin/python"' _ "$HERE")"
+if [ -x "$VENV_PY" ]; then
+  SAMPLER_HOME="$LIB/chop" "$VENV_PY" -I - "$HERE" "$LIB/chop" <<'PY'
+import sys
+from pathlib import Path
+import numpy as np, soundfile as sf
+here, lib = sys.argv[1], Path(sys.argv[2])
+lib.mkdir()
+sys.path.insert(0, f"{here}/flippack")
+import flippack as fp
+fp.check_home()
+bad = 0
+def check(name, cond):
+    global bad
+    print(("PASS  " if cond else "FAIL  ") + name); bad |= not cond
+def exits(fn, *a):
+    try:
+        fn(*a)
+    except SystemExit as e:
+        return str(e.code)
+    return ""
+sf.write(lib / "silent.wav", np.zeros((44100 * 30, 2), "float32"), 44100)
+check("silent audio refused before splitting", "silent" in exits(fp.check_audio, lib / "silent.wav"))
+t = np.arange(44100 * 5) / 44100
+sf.write(lib / "short.wav", (0.3 * np.sin(2 * np.pi * 220 * t)).astype("float32"), 44100)
+check("5 s clip refused as too short", "at least 20 s" in exits(fp.check_audio, lib / "short.wav"))
+z = np.zeros(fp.SR * 30, "float32")
+check("no beat -> clean exit, not an endless loop", exits(fp.beat_grid, z, z) != "")
+a = fp.pick_slug("song", "id:a")
+check("first song gets its name", a == "song")
+check("same song again reuses it", fp.pick_slug("song", "id:a") == "song")
+check("different song, same name -> song-2", fp.pick_slug("song", "id:b") == "song-2")
+(fp.PACKS / "old").mkdir()
+check("a pack with no .source is never reused", fp.pick_slug("old", "id:c") == "old-2")
+sys.exit(bad)
+PY
+else
+  echo "SKIP  chopper guards (no Python environment yet: ./setup.sh)"
+fi
 echo "ALL GREEN"

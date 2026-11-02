@@ -11,6 +11,7 @@ Section names (intro/verse/hook/break) are GUESSES from which stems play and wha
 bar numbers, times, tempo and the cut points are measured.
 """
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -70,46 +71,112 @@ def ytdlp_cmd():
 
 
 def rip(url):
+    """Download to a name keyed by the video's id (two videos with the same title can't collide).
+    Returns (wav path, title, identity)."""
     # argv list, no shell: the URL is never interpreted by a shell
     r = subprocess.run(ytdlp_cmd() + ["--no-playlist", "-x", "--audio-format", "wav",
-                        "-o", str(INBOX / "%(title)s.%(ext)s"),
+                        "-o", str(INBOX / ".dl-%(extractor_key)s-%(id)s.%(ext)s"),
+                        "--print", "after_move:%(extractor_key)s:%(id)s",
+                        "--print", "after_move:title",
                         "--print", "after_move:filepath", "--no-simulate", url],
                        capture_output=True, text=True)
     if r.returncode != 0:
         sys.exit(f"yt-dlp failed:\n{r.stderr[-800:]}")
-    path = Path(r.stdout.strip().splitlines()[-1])
-    if not path.exists():
-        sys.exit(f"yt-dlp reported {path} but it does not exist")
-    return path
+    out = r.stdout.strip().splitlines()
+    if len(out) < 3:
+        sys.exit(f"yt-dlp printed too little: {r.stdout[-300:]!r}")
+    ident, title, path = out[-3], out[-2], Path(out[-1])
+    if not path.is_file() or path.parent.resolve() != INBOX.resolve():
+        sys.exit(f"yt-dlp reported {path} but it is not in the inbox")
+    return path, title, ident
+
+
+def file_identity(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return "sha256:" + h.hexdigest()
+
+
+def pick_slug(base, ident):
+    """The first of base, base-2, base-3 ... that is free or already belongs to this same song.
+    inbox/<slug>.source records which song a slug belongs to, so a different song whose title or
+    file name makes the same slug gets its own name instead of reusing the first song's audio,
+    stems and pack. A slug with files but no .source (made before this existed, or by hand) is
+    never reused."""
+    for k in range(1, 1000):
+        slug = base if k == 1 else f"{base[:75]}-{k}"
+        marker = INBOX / f"{slug}.source"
+        if marker.exists():
+            if marker.read_text().strip() == ident:
+                return slug
+            continue
+        if any(os.path.lexists(x) for x in (INBOX / f"{slug}.wav", STEMS_DIR / slug, PACKS / slug)):
+            continue
+        try:
+            # O_EXCL: two runs at once can't both claim the same free slug
+            fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            if marker.read_text().strip() == ident:
+                return slug
+            continue
+        with os.fdopen(fd, "w") as f:
+            f.write(ident + "\n")
+        return slug
+    sys.exit(f"no free name for {base}")
+
+
+def check_audio(path):
+    # before demucs (minutes of work): refuse audio that can't make an 8-bar loop
+    try:
+        data, sr = sf.read(str(path), dtype="float32", always_2d=True)
+    except Exception as e:
+        sys.exit(f"could not read {path.name} as audio: {e}")
+    secs = len(data) / sr if sr else 0
+    if secs < 20:
+        sys.exit(f"{path.name} is {secs:.1f} s long; a song needs at least 20 s to make loops")
+    if not np.isfinite(data).all() or float(np.max(np.abs(data))) < 1e-3:
+        sys.exit(f"{path.name} is silent")
 
 
 def get_stems(source, slug_arg):
     if re.match(r"^https?://", source):
         log("ripping audio")
-        wav = rip(source)
-        slug = slug_arg or slugify(wav.stem)
+        wav, title, ident = rip(source)
     elif Path(source).is_file():
         wav = Path(source)
-        slug = slug_arg or slugify(wav.stem)
+        title, ident = wav.stem, None
     elif SLUG_RE.match(source) and (STEMS_DIR / source).is_dir():
         return source, STEMS_DIR / source, None
     else:
         sys.exit(f"SOURCE is not a URL, a file, or a slug with stems: {source}")
+    if slug_arg:
+        slug = slug_arg         # an explicit --slug is used as given (with --force to rebuild)
+    else:
+        slug = pick_slug(slugify(title), ident or file_identity(wav))
     if not SLUG_RE.match(slug):
         sys.exit(f"bad slug {slug!r}: use lowercase letters, digits and dashes")
     target = INBOX / f"{slug}.wav"
     if wav.resolve() != target.resolve():
         if target.exists():
             log(f"inbox already has {target.name}; using it")
+            if wav.parent.resolve() == INBOX.resolve() and wav.name.startswith(".dl-"):
+                wav.unlink()    # the fresh download of the same song is a duplicate
         elif wav.suffix.lower() != ".wav":
             # mp3/m4a/flac/aiff: decode to wav once so every later step reads the same file
             log(f"converting {wav.name} to wav")
-            r = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-i", str(wav),
-                                "-ac", "2", "-ar", "44100", str(target)])
+            # into a temp name first: a failed run must not leave a half file a retry would trust
+            tmp = target.with_name(f".{target.stem}.converting.wav")
+            r = subprocess.run(["ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-i", str(wav),
+                                "-ac", "2", "-ar", "44100", str(tmp)])
             if r.returncode != 0:
+                tmp.unlink(missing_ok=True)
                 sys.exit(f"ffmpeg could not read {wav.name}")
+            tmp.replace(target)
         else:
-            shutil.copy2(wav, target) if wav.parent != INBOX else wav.rename(target)
+            shutil.copy2(wav, target) if wav.parent.resolve() != INBOX.resolve() else wav.rename(target)
+    check_audio(target)
     sdir = STEMS_DIR / slug
     if all((sdir / f"{s}.wav").exists() for s in STEMS):
         log(f"stems already exist for {slug}; skipping separation")
@@ -130,11 +197,16 @@ def beat_grid(drums, mix):
     src = drums if np.sqrt(np.mean(drums ** 2)) > 0.01 else mix
     tempo, _ = librosa.beat.beat_track(y=src, sr=SR)
     t0 = float(np.atleast_1d(tempo)[0])
+    if not np.isfinite(t0) or t0 <= 0:
+        # a zero tempo would make the doubling loop below run forever
+        sys.exit("no beat found in this song")
     while t0 < 75:
         t0 *= 2
     while t0 >= 150:
         t0 /= 2
     _, beats = librosa.beat.beat_track(y=src, sr=SR, start_bpm=t0, units="time")
+    if len(beats) < 16:
+        sys.exit(f"only {len(beats)} beats found; need a steady beat for at least 4 bars")
     k = np.arange(len(beats))
     slope, icpt = np.polyfit(k, beats, 1)
     resid = np.abs(beats - (icpt + slope * k))
@@ -392,6 +464,9 @@ def main():
     anchor = int(np.argmin(np.abs(bars - first_drum_bar)))
     barlen = float(np.median(np.diff(bars)))
     nb = len(bars) - 1
+    if nb < 12:
+        # the loop finder needs room for an 8-bar window starting on a 4-bar boundary
+        sys.exit(f"only {nb} bars; a song needs at least 12 bars to make loops")
 
     log("key + levels + sections")
     key, kc, key2, kc2 = key_of(y)

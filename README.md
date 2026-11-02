@@ -9,7 +9,8 @@ setup and the chopping. It follows [AGENTS.md](AGENTS.md).
 
 ## Start
 
-You need a Mac (Linux should work too), Python 3.10+, ffmpeg, and an AI coding assistant.
+You need a Mac (Linux should work too), Python 3.10 to 3.14 (the stem splitter doesn't install on
+3.15 yet), ffmpeg, and an AI coding assistant.
 
 ```
 git clone <this repo>

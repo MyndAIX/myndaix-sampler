@@ -10,9 +10,12 @@
   /requests/<id>   the agent POSTs progress: working, done (with the pack), failed
   /upload          the app POSTs a dropped audio file (?name=&deck=); it lands in $SAMPLER_HOME/inbox/
 
-Binds 127.0.0.1 only. POSTs must carry the X-VS header: a web page on another site can't add a
-custom header to a cross-origin request without a CORS preflight this server never approves, so
-it can't drive the sampler or queue downloads.
+Binds 127.0.0.1 only. Three guards keep other web pages out:
+  - every request must name this server in its Host header (127.0.0.1 or localhost + port). A page
+    that DNS-rebinds its own hostname to 127.0.0.1 still sends its own name as Host, so it's refused.
+  - POSTs must carry the X-VS header: a cross-origin page can't add a custom header without a CORS
+    preflight this server never approves.
+  - a POST whose Origin header names another site is refused.
 """
 import json
 import os
@@ -68,16 +71,32 @@ def safe_name(name):
     return stem, ext
 
 
+def inside(path, root):
+    # resolves symlinks: a link under packs/ that points elsewhere is outside
+    path, root = os.path.realpath(path), os.path.realpath(root)
+    return path == root or path.startswith(root + os.sep)
+
+
 class Handler(SimpleHTTPRequestHandler):
     def translate_path(self, path):
         p = urlparse(path).path
-        # SimpleHTTPRequestHandler drops ".." parts and joins onto self.directory, so requests
-        # stay inside APP or PACKS
+        # SimpleHTTPRequestHandler drops ".." parts and joins onto self.directory; inside() then
+        # rejects anything a symlink would take out of APP or PACKS
         if p.startswith("/packs/"):
             self.directory = str(PACKS)
-            return super().translate_path(p[len("/packs"):])
-        self.directory = str(APP)
-        return super().translate_path(p)
+            out = super().translate_path(p[len("/packs"):])
+        else:
+            self.directory = str(APP)
+            out = super().translate_path(p)
+        return out if inside(out, self.directory) else os.path.join(self.directory, ".denied", "404")  # a path that never exists -> 404
+
+    def host_ok(self):
+        port = self.server.server_address[1]
+        allowed = {f"127.0.0.1:{port}", f"localhost:{port}"}
+        if self.headers.get("Host", "").lower() not in allowed:
+            self.send_json({"error": "wrong Host: open the sampler at http://127.0.0.1:%d/" % port}, 403)
+            return False
+        return True
 
     def log_message(self, format, *args):  # silence per-request logging (the app polls 6x a second)
         pass
@@ -91,7 +110,13 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_HEAD(self):
+        if self.host_ok():
+            super().do_HEAD()
+
     def do_GET(self):
+        if not self.host_ok():
+            return
         u = urlparse(self.path)
         if u.path == "/api/packs":
             packs = sorted(d.name for d in PACKS.iterdir()
@@ -113,8 +138,15 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def guard(self):
+        if not self.host_ok():
+            return False
         if self.headers.get("X-VS") != "1":
             self.send_json({"error": "missing X-VS header"}, 403)
+            return False
+        origin = self.headers.get("Origin")
+        port = self.server.server_address[1]
+        if origin is not None and origin.lower() not in (f"http://127.0.0.1:{port}", f"http://localhost:{port}"):
+            self.send_json({"error": "foreign Origin"}, 403)
             return False
         return True
 
@@ -145,14 +177,29 @@ class Handler(SimpleHTTPRequestHandler):
         if ext not in AUDIO_EXT:
             return self.send_json({"error": f"audio files only: {' '.join(sorted(AUDIO_EXT))}"}, 400)
         INBOX.mkdir(parents=True, exist_ok=True)
-        with lock:
-            dest, k = INBOX / f"{stem}{ext}", 2
-            while dest.exists():
-                dest, k = INBOX / f"{stem}-{k}{ext}", k + 1
+        # The .part file is the reservation: O_EXCL makes two concurrent uploads of the same name
+        # pick different names, and O_NOFOLLOW refuses a planted symlink instead of writing through it.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        k = 1
+        while True:
+            dest = INBOX / (f"{stem}{ext}" if k == 1 else f"{stem}-{k}{ext}")
             part = dest.with_name(f".{dest.name}.part")
-            part.touch()            # reserves the name while the body streams in
+            k += 1
+            if os.path.lexists(dest):
+                continue
+            try:
+                fd = os.open(part, flags, 0o644)
+            except FileExistsError:
+                continue
+            # an upload that held this .part may have finished (renamed it to dest) just before
+            # our open, so the name is taken after all
+            if os.path.lexists(dest):
+                os.close(fd)
+                part.unlink(missing_ok=True)
+                continue
+            break
         try:
-            with part.open("wb") as f:
+            with os.fdopen(fd, "wb") as f:
                 left = n
                 while left:
                     chunk = self.rfile.read(min(left, 1 << 20))
@@ -160,6 +207,8 @@ class Handler(SimpleHTTPRequestHandler):
                         raise ConnectionError("upload cut off")
                     f.write(chunk)
                     left -= len(chunk)
+            if os.path.lexists(dest):
+                raise FileExistsError(f"{dest.name} appeared during the upload")
             part.replace(dest)
         except Exception as e:
             part.unlink(missing_ok=True)
