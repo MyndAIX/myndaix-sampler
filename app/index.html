@@ -31,6 +31,8 @@
   button .fk { color:var(--dim); font-family:ui-monospace, Menlo, monospace; margin-right:4px; }
   .pitch { margin-left:auto; display:flex; gap:4px; align-items:center; font-family:ui-monospace, Menlo, monospace; font-size:12px; }
   .pitch .val { min-width:92px; text-align:center; }
+  .wave { display:block; width:100%; height:76px; background:#0c0d0f; border:1px solid var(--line); border-radius:6px;
+          margin-bottom:10px; }
   .grid { display:grid; grid-template-columns:repeat(4, 1fr); gap:7px; }
   .pad { aspect-ratio:1; background:var(--pad); border-radius:8px; border:1px solid var(--line); cursor:pointer;
          user-select:none; transition:background .08s; display:flex; flex-direction:column; justify-content:space-between;
@@ -73,7 +75,7 @@ const DECKS = {
        up: "h", down: "n", reset: "y", defaultBank: "synth16" },
 };
 for (const id in DECKS) Object.assign(DECKS[id], { id, pack: null, meta: null, banks: {}, bank: null,
-                                                   loops: {}, clock0: null, semis: 0 });
+                                                   loops: {}, clock0: null, semis: 0, view: null, canvas: null });
 
 const ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "interactive" });
 const cache = {};          // "pack/file" -> AudioBuffer, shared so both decks on one pack decode once
@@ -130,14 +132,19 @@ function hit(d, i, who = "you") {
   else {
     const src = ctx.createBufferSource();
     src.buffer = buf(d, f); src.playbackRate.value = rate(d); src.connect(ctx.destination); src.start();
+    d.view = { f, b: src.buffer, name: `${i + 1} · ${nm(f)}`, loop: false, at: ctx.currentTime, r: rate(d) };
   }
   pushState();
 }
 
 function toggleLoop(d, f) {
   const cur = d.loops[f];
-  if (cur) { cur.src.stop(nextBar(d)); delete d.loops[f]; }
-  else {
+  if (cur) {
+    const stopAt = nextBar(d);
+    cur.src.stop(stopAt); delete d.loops[f];
+    // keep drawing it until it actually stops on the bar line
+    if (d.view && d.view.loop && d.view.f === f) d.view.until = stopAt;
+  } else {
     const at = nextBar(d);
     const src = ctx.createBufferSource();
     src.buffer = buf(d, f); src.loop = true; src.playbackRate.value = rate(d); src.connect(ctx.destination);
@@ -145,6 +152,7 @@ function toggleLoop(d, f) {
     const offset = (((at - d.clock0) * rate(d)) % src.buffer.duration + src.buffer.duration) % src.buffer.duration;
     src.start(at, offset);
     d.loops[f] = { src, at };
+    d.view = { f, b: src.buffer, name: nm(f), loop: true, at };
   }
   renderDeck(d);
 }
@@ -152,8 +160,82 @@ function toggleLoop(d, f) {
 function stopLoops(d) {
   for (const f in d.loops) d.loops[f].src.stop();
   d.loops = {}; d.clock0 = null;
+  if (d.view && d.view.loop) d.view.idle = true;
   if (d.meta) renderDeck(d);
 }
+
+// ---- waveform screen: the sample last hit on the deck, played part in orange, white playhead ----
+const nm = f => f.split("/").pop().replace(/\.wav$/, "");
+const peakCache = new WeakMap();   // AudioBuffer -> { n, p: [min,max] per column, norm }
+function peaks(b, n) {
+  const m = peakCache.get(b);
+  if (m && m.n === n) return m;
+  const chs = []; for (let c = 0; c < b.numberOfChannels; c++) chs.push(b.getChannelData(c));
+  const p = new Float32Array(n * 2), len = b.length;
+  let norm = 1e-4;
+  for (let x = 0; x < n; x++) {
+    let lo = 0, hi = 0;
+    for (let i = Math.floor(x * len / n), e = Math.min(len, Math.floor((x + 1) * len / n)); i < e; i++) {
+      let v = 0; for (const ch of chs) v += ch[i];
+      v /= chs.length; if (v < lo) lo = v; if (v > hi) hi = v;
+    }
+    p[2 * x] = lo; p[2 * x + 1] = hi; norm = Math.max(norm, -lo, hi);
+  }
+  const out = { n, p, norm };      // norm: scale each sample to fill the screen, so quiet chops still show
+  peakCache.set(b, out);
+  return out;
+}
+const css = getComputedStyle(document.documentElement);
+const C = { hi: css.getPropertyValue("--hi").trim(), text: css.getPropertyValue("--text").trim(),
+            dim: css.getPropertyValue("--dim").trim(), wave: "#6b6f78", idle: "#4a4d55" };
+
+function drawDeck(d) {
+  const cv = d.canvas;
+  if (!cv || !cv.isConnected) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = Math.round(cv.clientWidth * dpr), H = Math.round(cv.clientHeight * dpr);
+  if (!W || !H) return;
+  if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+  const g = cv.getContext("2d");
+  g.clearRect(0, 0, W, H);
+  g.font = `${11 * dpr}px ui-monospace, Menlo, monospace`;
+  let v = d.view;
+  if (!v) { g.fillStyle = C.dim; g.fillText("hit a pad", 8 * dpr, H / 2 + 4 * dpr); return; }
+  const t = ctx.currentTime;
+  if (v.loop && !v.idle && v.until !== undefined && t >= v.until) {
+    // the shown loop has stopped: show another loop still running, or leave it on screen at rest
+    const other = Object.keys(d.loops).pop();
+    v = d.view = other ? { f: other, b: d.loops[other].src.buffer, name: nm(other), loop: true, at: d.loops[other].at }
+                       : { ...v, idle: true };
+  }
+  const dur = v.b.duration;
+  let pos = null, label = v.name;
+  if (v.loop && !v.idle) {
+    if (t >= v.at && d.clock0 !== null) {
+      // same phase formula the loops start with, so the playhead matches what is heard
+      pos = (((t - d.clock0) * rate(d)) % dur + dur) % dur;
+      const bl = d.meta.barlen;
+      label += `  ·  bar ${Math.floor(pos / bl) + 1}/${Math.round(dur / bl)}`;
+    } else label += "  ·  starts on the bar";
+  } else if (!v.loop) {
+    const e = (t - v.at) * v.r;
+    if (e < dur) pos = e;
+  }
+  const n = Math.max(1, Math.floor(W / dpr));           // one column per CSS pixel
+  const { p, norm } = peaks(v.b, n);
+  const px = pos === null ? -1 : pos / dur * n;
+  const mid = H / 2, amp = (H / 2 - 3 * dpr) / norm;
+  for (let x = 0; x < n; x++) {
+    g.fillStyle = x < px ? C.hi : (pos === null ? C.idle : C.wave);
+    const y0 = mid - p[2 * x + 1] * amp, y1 = mid - p[2 * x] * amp;
+    g.fillRect(x * dpr, y0, dpr, Math.max(dpr, y1 - y0));
+  }
+  if (pos !== null) { g.fillStyle = C.text; g.fillRect(Math.floor(px * dpr), 0, Math.max(1, Math.round(dpr)), H); }
+  const tw = g.measureText(label).width;
+  g.fillStyle = "rgba(12,13,15,.75)"; g.fillRect(3 * dpr, 3 * dpr, tw + 8 * dpr, 15 * dpr);
+  g.fillStyle = C.text; g.fillText(label, 7 * dpr, 14 * dpr);
+}
+(function frame() { Object.values(DECKS).forEach(drawDeck); requestAnimationFrame(frame); })();
 
 function setBank(d, name) {
   if (!d.banks[name]) return;
@@ -214,7 +296,8 @@ function renderDeck(d) {
     p.onpointerdown = () => hit(d, i);
     grid.append(p);
   }
-  el.append(h, row, grid);
+  const cv = document.createElement("canvas"); cv.className = "wave"; d.canvas = cv;
+  el.append(h, row, cv, grid);
 }
 
 let stateTimer = null;
