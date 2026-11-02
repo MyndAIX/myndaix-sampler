@@ -245,8 +245,9 @@ check("... then replaces it", out.strip() == "up" and not (fp.SONGS / "up.wav").
       and (fp.SONGS / "up.source").read_text().strip() == "id:z")
 
 # a run that chose a slug, then lost it to a --force run before getting the lock, stops
+# race's owner is whichever of the 4 concurrent runs got there first, so read it rather than assume
 h = holder("race")
-c = claim("race", "id:0")
+c = claim("race", (fp.SONGS / "race.source").read_text().strip())
 time.sleep(1.5)
 (fp.SONGS / "race.source").write_text("id:someone-else\n")
 h.stdin.close(); h.wait()
