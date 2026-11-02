@@ -1,4 +1,4 @@
-# Virtual Sampler
+# MyndAIX-Sampler
 
 A two-deck, 16-pad sampler that runs in your browser. Paste a YouTube link (or drop an audio
 file) and the song gets split into drums, bass, synths and vocals, cut into 8-bar loops and
@@ -14,7 +14,7 @@ You need a Mac (Linux should work too), Python 3.10 to 3.14 (the stem splitter d
 
 ```
 git clone <this repo>
-cd virtual-sampler
+cd myndaix-sampler
 ```
 
 Open your AI assistant in this folder and say: **"set up the sampler and start it."**
