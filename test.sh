@@ -40,14 +40,18 @@ c, _ = req("/control", "POST", b'{"cmd":"zap"}', H); check("unknown command refu
 c, _ = req("/control", "POST", b"[1]", H); check("non-object refused (400)", c == 400)
 c, _ = req("/control", "POST", b'{"cmd":"say","text":"' + b"x" * 5000 + b'"}', H); check("oversize body refused (413)", c == 413)
 env = dict(os.environ, VS_URL=B)
-out = subprocess.run([sys.executable, "-I", f"{here}/vs.py", "bank", "vocal16"], capture_output=True, text=True, env=env)
+out = subprocess.run([sys.executable, "-I", f"{here}/vs.py", "bank", "R", "vocal16"], capture_output=True, text=True, env=env)
 check("vs.py bank queues a command", out.returncode == 0 and "'seq'" in out.stdout)
 c, b = req("/control?after=0"); cmds = json.loads(b)["cmds"]
-check("queue returns it", any(x.get("cmd") == "bank" and x.get("name") == "vocal16" for x in cmds))
+check("queue returns it", any(x.get("cmd") == "bank" and x.get("name") == "vocal16" and x.get("deck") == "R" for x in cmds))
 req("/state", "POST", b'{"bank":"mix16"}', H)
 c, b = req("/state"); check("state round-trips", json.loads(b).get("bank") == "mix16")
-out = subprocess.run([sys.executable, "-I", f"{here}/vs.py", "pad", "17"], capture_output=True, text=True, env=env)
+out = subprocess.run([sys.executable, "-I", f"{here}/vs.py", "pad", "L", "17"], capture_output=True, text=True, env=env)
 check("vs.py rejects pad 17", out.returncode == 2)
+out = subprocess.run([sys.executable, "-I", f"{here}/vs.py", "pitch", "X", "2"], capture_output=True, text=True, env=env)
+check("vs.py rejects deck X", out.returncode == 2)
+out = subprocess.run([sys.executable, "-I", f"{here}/vs.py", "pitch", "L", "-3"], capture_output=True, text=True, env=env)
+check("vs.py pitch L -3 queues", out.returncode == 0 and "'seq'" in out.stdout)
 sys.exit(bad)
 PY
 echo "ALL GREEN"

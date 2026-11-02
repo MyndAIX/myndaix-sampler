@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Mack's side of the sampler: send a command, or read what the app is doing.
+DECK is L (left) or R (right).
 
-  vs.py state                  what is loaded, which bank, recent pad hits
-  vs.py bank vocal16           switch the pads to a bank (loops, synth16, mix16, vocal16)
-  vs.py pad 5                  hit pad 5 (1-16, pad 1 bottom-left)
-  vs.py load <pack-slug>       load another flip pack
-  vs.py stop                   stop all loops
+  vs.py state                  what each deck has loaded, banks, pitch, recent pad hits
+  vs.py bank DECK vocal16      switch a deck's bank (loops, synth16, mix16, vocal16)
+  vs.py pad DECK 5             hit a pad (1-16, pad 1 bottom-left)
+  vs.py pitch DECK -3          set a deck's pitch in semitones (-12..12; speed moves with it)
+  vs.py load DECK <pack-slug>  load another flip pack on a deck
+  vs.py stop                   stop all loops on both decks
   vs.py say "text"             show a message on the sampler screen
 """
 import json
 import os
+import re
 import sys
 import urllib.request
 
@@ -24,24 +27,33 @@ def call(method, path, obj=None):
         return json.loads(r.read())
 
 
+def send(obj):
+    print(call("POST", "/control", obj))
+    return 0
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
         return 0
     cmd, rest = argv[0], argv[1:]
-    if cmd == "state":
+    if cmd == "state" and not rest:
         print(json.dumps(call("GET", "/state"), indent=1))
         return 0
-    if cmd in ("bank", "load", "say") and len(rest) == 1:
-        key = {"bank": "name", "load": "pack", "say": "text"}[cmd]
-        print(call("POST", "/control", {"cmd": cmd, key: rest[0]}))
-        return 0
-    if cmd == "pad" and len(rest) == 1 and rest[0].isdigit() and 1 <= int(rest[0]) <= 16:
-        print(call("POST", "/control", {"cmd": "pad", "pad": int(rest[0])}))
-        return 0
     if cmd == "stop" and not rest:
-        print(call("POST", "/control", {"cmd": "stop"}))
-        return 0
+        return send({"cmd": "stop"})
+    if cmd == "say" and len(rest) == 1:
+        return send({"cmd": "say", "text": rest[0]})
+    if len(rest) == 2 and rest[0] in ("L", "R"):
+        deck, arg = rest
+        if cmd == "bank":
+            return send({"cmd": "bank", "deck": deck, "name": arg})
+        if cmd == "load":
+            return send({"cmd": "load", "deck": deck, "pack": arg})
+        if cmd == "pad" and arg.isdigit() and 1 <= int(arg) <= 16:
+            return send({"cmd": "pad", "deck": deck, "pad": int(arg)})
+        if cmd == "pitch" and re.fullmatch(r"[+-]?\d{1,2}", arg) and -12 <= int(arg) <= 12:
+            return send({"cmd": "pitch", "deck": deck, "semis": int(arg)})
     print(__doc__, file=sys.stderr)
     return 2
 

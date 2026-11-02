@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, urlparse
 APP = Path(__file__).resolve().parent / "app"
 PACKS = Path("/Volumes/Crucial Media/sampler/packs")
 PORT = 8765
-COMMANDS = {"bank", "pad", "load", "stop", "say"}
+COMMANDS = {"bank", "pad", "load", "stop", "say", "pitch"}
 MAX_BODY = 4096
 
 lock = threading.Lock()
