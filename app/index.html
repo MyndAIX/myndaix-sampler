@@ -123,11 +123,11 @@ function flash(d, i) {
   if (el) { el.classList.add("hit"); setTimeout(() => el.classList.remove("hit"), 110); }
 }
 
-function hit(d, i, who = "you") {
+function hit(d, i, who = "you", via = "") {
   const f = (d.banks[d.bank] || [])[i];
   if (!f || !buf(d, f)) return;
   flash(d, i);
-  S.hits.push({ deck: d.id, pad: i + 1, bank: d.bank, who, t: Date.now() }); S.hits.splice(0, S.hits.length - 20);
+  S.hits.push({ deck: d.id, pad: i + 1, bank: d.bank, who, via, t: Date.now() }); S.hits.splice(0, S.hits.length - 20);
   if (d.bank === "loops") toggleLoop(d, f);
   else {
     const src = ctx.createBufferSource();
@@ -293,7 +293,7 @@ function renderDeck(d) {
     p.dataset.pad = i;
     p.innerHTML = `<span class="n">${i + 1}</span><span class="nm"></span><span class="k">${d.keys[i].toUpperCase()}</span>`;
     p.querySelector(".nm").textContent = f ? f.split("/").pop().replace(/\.wav$/, "") : "";
-    p.onpointerdown = () => hit(d, i);
+    p.onpointerdown = () => hit(d, i, "you", "click");
     grid.append(p);
   }
   const cv = document.createElement("canvas"); cv.className = "wave"; d.canvas = cv;
@@ -342,7 +342,7 @@ document.addEventListener("keydown", e => {
   if (k === " ") { e.preventDefault(); Object.values(DECKS).forEach(stopLoops); pushState(); return; }
   for (const d of Object.values(DECKS)) {
     const i = d.keys.indexOf(k);
-    if (i >= 0) { e.preventDefault(); hit(d, i); return; }
+    if (i >= 0) { e.preventDefault(); hit(d, i, "you", "key"); return; }
     if (k === d.up) return setPitch(d, d.semis + 1);
     if (k === d.down) return setPitch(d, d.semis - 1);
     if (k === d.reset) return setPitch(d, 0);
@@ -354,7 +354,7 @@ if (navigator.requestMIDIAccess) navigator.requestMIDIAccess().then(m => {
   const bind = inp => inp.onmidimessage = ev => {
     const [st, note, vel] = ev.data;
     if ((st & 0xf0) !== 0x90 || vel === 0 || note < 36 || note > 67) return;
-    hit(note < 52 ? DECKS.L : DECKS.R, (note - 36) % 16);
+    hit(note < 52 ? DECKS.L : DECKS.R, (note - 36) % 16, "you", "midi");
   };
   m.inputs.forEach(bind);
   m.onstatechange = e => e.port.type === "input" && e.port.state === "connected" && bind(e.port);
