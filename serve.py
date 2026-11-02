@@ -1,33 +1,71 @@
 #!/usr/bin/env python3
-"""Local server for the virtual sampler.
+"""Local server for the sampler.
 
-  /            the app (app/)
-  /packs/...   flip packs from the Crucial drive, read-only
-  /api/packs   list of packs that have an analysis.json
-  /control     command queue: Mack POSTs commands, the app polls them (GET ?after=<seq>)
-  /state       the app POSTs what it is doing; Mack GETs it
+  /                the app (app/)
+  /packs/...       packs from $SAMPLER_HOME/packs, read-only
+  /api/packs       packs that have an analysis.json
+  /control         command queue: an AI agent POSTs commands (vs.py), the app polls them (GET ?after=<seq>)
+  /state           the app POSTs what it is doing; the agent GETs it
+  /requests        songs the player asked for (a link or a dropped file); the agent chops them (vs.py run)
+  /requests/<id>   the agent POSTs progress: working, done (with the pack), failed
+  /upload          the app POSTs a dropped audio file (?name=&deck=); it lands in $SAMPLER_HOME/inbox/
 
 Binds 127.0.0.1 only. POSTs must carry the X-VS header: a web page on another site can't add a
 custom header to a cross-origin request without a CORS preflight this server never approves, so
-it can't drive the sampler.
+it can't drive the sampler or queue downloads.
 """
 import json
+import os
+import re
 import sys
 import threading
+import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-APP = Path(__file__).resolve().parent / "app"
-PACKS = Path("/Volumes/Crucial Media/sampler/packs")
+REPO = Path(__file__).resolve().parent
+APP = REPO / "app"
+DEFAULT_HOME = REPO / "library"
+HOME = Path(os.environ.get("SAMPLER_HOME") or DEFAULT_HOME)
+PACKS, INBOX = HOME / "packs", HOME / "inbox"
+REQ_FILE = HOME / "requests.json"
 PORT = 8765
 COMMANDS = {"bank", "pad", "load", "stop", "say", "pitch"}
 MAX_BODY = 4096
+MAX_UPLOAD = 300 * 1024 * 1024
+AUDIO_EXT = {".wav", ".mp3", ".m4a", ".flac", ".aif", ".aiff", ".ogg"}
+# https only; no quotes, spaces, $ or backticks. The link only ever reaches yt-dlp as one argv item.
+URL_RE = re.compile(r"^https://[^\s\"'`$\\<>|;(){}]{1,500}$")
+STATUSES = {"working", "done", "failed"}
 
 lock = threading.Lock()
 queue = []          # [(seq, cmd dict)], newest last, capped
 seq = 0
 state = {}
+requests = []       # song requests, persisted to REQ_FILE so a restart doesn't lose them
+
+
+def save_requests():
+    tmp = REQ_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(requests[-100:], indent=1))
+    tmp.replace(REQ_FILE)           # atomic rename
+
+
+def add_request(kind, src, deck):
+    req = {"id": (requests[-1]["id"] + 1) if requests else 1, "kind": kind, "src": src,
+           "deck": deck if deck in ("L", "R") else "L", "status": "waiting", "note": "", "pack": None,
+           "t": int(time.time())}
+    requests.append(req)
+    save_requests()
+    return req
+
+
+def safe_name(name):
+    p = Path(name)
+    ext = p.suffix.lower()
+    stem = re.sub(r"[^a-z0-9]+", "-", p.stem.lower()).strip("-")[:60].strip("-") or "song"
+    return stem, ext
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -69,11 +107,19 @@ class Handler(SimpleHTTPRequestHandler):
         if u.path == "/state":
             with lock:
                 return self.send_json(state)
+        if u.path == "/requests":
+            with lock:
+                return self.send_json({"requests": requests})
         return super().do_GET()
 
-    def read_json(self):
+    def guard(self):
         if self.headers.get("X-VS") != "1":
             self.send_json({"error": "missing X-VS header"}, 403)
+            return False
+        return True
+
+    def read_json(self):
+        if not self.guard():
             return None
         n = int(self.headers.get("Content-Length") or 0)
         if n <= 0 or n > MAX_BODY:
@@ -89,10 +135,47 @@ class Handler(SimpleHTTPRequestHandler):
             return None
         return obj
 
+    def upload(self, q):
+        if not self.guard():
+            return
+        n = int(self.headers.get("Content-Length") or 0)
+        if n <= 0 or n > MAX_UPLOAD:
+            return self.send_json({"error": f"file must be under {MAX_UPLOAD // 2**20} MB"}, 413)
+        stem, ext = safe_name(q.get("name", [""])[0])
+        if ext not in AUDIO_EXT:
+            return self.send_json({"error": f"audio files only: {' '.join(sorted(AUDIO_EXT))}"}, 400)
+        INBOX.mkdir(parents=True, exist_ok=True)
+        with lock:
+            dest, k = INBOX / f"{stem}{ext}", 2
+            while dest.exists():
+                dest, k = INBOX / f"{stem}-{k}{ext}", k + 1
+            part = dest.with_name(f".{dest.name}.part")
+            part.touch()            # reserves the name while the body streams in
+        try:
+            with part.open("wb") as f:
+                left = n
+                while left:
+                    chunk = self.rfile.read(min(left, 1 << 20))
+                    if not chunk:
+                        raise ConnectionError("upload cut off")
+                    f.write(chunk)
+                    left -= len(chunk)
+            part.replace(dest)
+        except Exception as e:
+            part.unlink(missing_ok=True)
+            return self.send_json({"error": str(e)}, 400)
+        with lock:
+            req = add_request("file", dest.name, q.get("deck", ["L"])[0])
+        return self.send_json({"ok": True, "request": req})
+
     def do_POST(self):
         global seq, state
-        path = urlparse(self.path).path
-        if path not in ("/control", "/state"):
+        u = urlparse(self.path)
+        path = u.path
+        if path == "/upload":
+            return self.upload(parse_qs(u.query))
+        m = re.fullmatch(r"/requests/(\d+)", path)
+        if path not in ("/control", "/state", "/requests") and not m:
             return self.send_json({"error": "not found"}, 404)
         obj = self.read_json()
         if obj is None:
@@ -101,6 +184,23 @@ class Handler(SimpleHTTPRequestHandler):
             if path == "/state":
                 state = obj
                 return self.send_json({"ok": True})
+            if path == "/requests":
+                url = str(obj.get("url", "")).strip()
+                if not URL_RE.match(url):
+                    return self.send_json({"error": "paste a full https:// link"}, 400)
+                return self.send_json({"ok": True, "request": add_request("link", url, obj.get("deck"))})
+            if m:
+                req = next((r for r in requests if r["id"] == int(m.group(1))), None)
+                if req is None:
+                    return self.send_json({"error": "no such request"}, 404)
+                if obj.get("status") not in STATUSES:
+                    return self.send_json({"error": f"status must be one of {sorted(STATUSES)}"}, 400)
+                req["status"] = obj["status"]
+                req["note"] = str(obj.get("note", ""))[:300]
+                pack = obj.get("pack")
+                req["pack"] = pack if isinstance(pack, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", pack) else None
+                save_requests()
+                return self.send_json({"ok": True, "request": req})
             if obj.get("cmd") not in COMMANDS:
                 return self.send_json({"error": f"cmd must be one of {sorted(COMMANDS)}"}, 400)
             seq += 1
@@ -111,9 +211,17 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    if not PACKS.is_dir():
-        sys.exit(f"packs folder not found: {PACKS} (is Crucial Media mounted?)")
+    # A SAMPLER_HOME that is missing is usually an unplugged drive. Creating it would write the
+    # library onto the internal disk under /Volumes, so only the default library is ever created.
+    if HOME != DEFAULT_HOME and not HOME.is_dir():
+        sys.exit(f"SAMPLER_HOME {HOME} does not exist (is the drive plugged in?)")
+    PACKS.mkdir(parents=True, exist_ok=True)
+    if REQ_FILE.exists():
+        try:
+            requests = json.loads(REQ_FILE.read_text())
+        except ValueError:
+            REQ_FILE.rename(REQ_FILE.with_suffix(f".bad-{int(time.time())}"))
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"virtual sampler: http://127.0.0.1:{port}/", flush=True)
+    print(f"sampler: http://127.0.0.1:{port}/", flush=True)
     srv.serve_forever()

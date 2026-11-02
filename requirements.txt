@@ -1,0 +1,7 @@
+# Versions known to work together (demucs pulls in PyTorch)
+demucs>=4.1.0
+librosa>=1.0.0
+numpy>=2.0
+scipy>=1.11
+soundfile>=0.12
+yt-dlp

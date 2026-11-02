@@ -31,6 +31,15 @@
   button .fk { color:var(--dim); font-family:ui-monospace, Menlo, monospace; margin-right:4px; }
   .pitch { margin-left:auto; display:flex; gap:4px; align-items:center; font-family:ui-monospace, Menlo, monospace; font-size:12px; }
   .pitch .val { min-width:92px; text-align:center; }
+  .add { display:flex; gap:6px; margin:10px 0; flex-wrap:wrap; }
+  .add input { flex:1; min-width:220px; background:var(--panel); color:var(--text); border:1px solid var(--line);
+               border-radius:6px; padding:7px 10px; font:inherit; }
+  .add select { background:var(--pad); color:var(--text); border:1px solid var(--line); border-radius:6px; font:inherit; }
+  .reqs { color:var(--dim); font-size:12px; margin:-4px 0 10px; }
+  .reqs .working { color:var(--hi); } .reqs .done { color:var(--loop-on); } .reqs .failed { color:#e05555; }
+  .deck.drop { box-shadow:0 0 0 2px var(--hi); }
+  .welcome { grid-column:1 / -1; text-align:center; padding:28px 12px; color:var(--dim); font-size:15px; line-height:1.7; }
+  .welcome b { color:var(--text); }
   .wave { display:block; width:100%; height:76px; background:#0c0d0f; border:1px solid var(--line); border-radius:6px;
           margin-bottom:10px; }
   .grid { display:grid; grid-template-columns:repeat(4, 1fr); gap:7px; }
@@ -52,6 +61,12 @@
 <main>
   <header><h1>VIRTUAL SAMPLER</h1><span class="help" style="margin:0">Space stops all loops</span></header>
   <div class="screen" id="screen"></div>
+  <form class="add" id="add">
+    <input id="link" type="url" placeholder="Paste a YouTube link to chop a song onto the pads (or drop an audio file on a deck)" autocomplete="off">
+    <select id="linkdeck" aria-label="deck"><option value="L">left deck</option><option value="R">right deck</option></select>
+    <button type="submit">Add song</button>
+  </form>
+  <div class="reqs" id="reqs"></div>
   <div class="decks">
     <section class="deck" id="deck-L"></section>
     <section class="deck" id="deck-R"></section>
@@ -309,7 +324,7 @@ function pushState() {
                                                                          loops: Object.keys(d.loops) }])) }) }).catch(() => {}), 50);
 }
 
-// Mack's commands arrive through the local server's queue
+// The AI agent's commands (vs.py) arrive through the local server's queue
 async function poll() {
   try {
     const r = await (await fetch(`/control?after=${S.seq}`, { cache: "no-store" })).json();
@@ -318,12 +333,16 @@ async function poll() {
     else for (const c of r.cmds) {
       S.seq = Math.max(S.seq, c.seq);
       const d = DECKS[c.deck] || DECKS.L;
-      if (c.cmd === "bank") { setBank(d, String(c.name)); say(`Mack: ${d.id} bank ${c.name}`); }
-      else if (c.cmd === "pad") hit(d, Number(c.pad) - 1, "mack");
-      else if (c.cmd === "pitch") { setPitch(d, Number(c.semis)); say(`Mack: ${d.id} pitch ${d.semis}`); }
-      else if (c.cmd === "load") { say(`Mack: ${d.id} loading ${c.pack}`); if (S.packs.includes(c.pack)) await loadPack(d, c.pack); }
-      else if (c.cmd === "stop") { Object.values(DECKS).forEach(stopLoops); say("Mack: stop"); }
-      else if (c.cmd === "say") say(`Mack: ${String(c.text).slice(0, 200)}`);
+      if (c.cmd === "bank") { setBank(d, String(c.name)); say(`AI: ${d.id} bank ${c.name}`); }
+      else if (c.cmd === "pad") hit(d, Number(c.pad) - 1, "ai");
+      else if (c.cmd === "pitch") { setPitch(d, Number(c.semis)); say(`AI: ${d.id} pitch ${d.semis}`); }
+      else if (c.cmd === "load") {
+        say(`AI: ${d.id} loading ${c.pack}`);
+        if (!S.packs.includes(c.pack)) await refreshPacks();     // a pack the AI just made
+        if (S.packs.includes(c.pack)) { await loadPack(d, c.pack); renderAll(); }
+      }
+      else if (c.cmd === "stop") { Object.values(DECKS).forEach(stopLoops); say("AI: stop"); }
+      else if (c.cmd === "say") say(`AI: ${String(c.text).slice(0, 200)}`);
     }
   } catch (e) { /* server restarting; try again */ }
   setTimeout(poll, 150);
@@ -331,7 +350,7 @@ async function poll() {
 
 document.addEventListener("keydown", e => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
-  if (e.target.tagName === "SELECT") return;
+  if (["SELECT", "INPUT", "TEXTAREA"].includes(e.target.tagName)) return;
   // F-keys: block the browser's own use (F5 = reload) before anything else
   for (const d of Object.values(DECKS)) {
     const j = d.fkeys.indexOf(e.key);
@@ -360,17 +379,82 @@ if (navigator.requestMIDIAccess) navigator.requestMIDIAccess().then(m => {
   m.onstatechange = e => e.port.type === "input" && e.port.state === "connected" && bind(e.port);
 }).catch(() => {});
 
+async function refreshPacks() {
+  S.packs = (await (await fetch("/api/packs", { cache: "no-store" })).json()).packs;
+}
+function renderAll() {
+  for (const d of Object.values(DECKS)) {
+    if (d.meta) { renderDeck(d); continue; }
+    // empty deck: the welcome text, until a song is chopped onto it
+    const el = $(`deck-${d.id}`);
+    el.innerHTML = `<h2><span>${d.id === "L" ? "LEFT" : "RIGHT"}</span></h2><div class="grid"><div class="welcome">
+      <b>No song on this deck yet.</b><br>Paste a YouTube link above, or drop an audio file here.<br>
+      Then ask your AI to chop it: it follows <b>AGENTS.md</b> in this folder.</div></div>`;
+  }
+}
+
+// ---- adding songs: a link or a dropped file becomes a request; the AI agent chops it ----
+async function postJSON(url, obj) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", "X-VS": "1" }, body: JSON.stringify(obj) });
+  return [r.ok, await r.json().catch(() => ({}))];
+}
+$("add").onsubmit = async e => {
+  e.preventDefault();
+  const url = $("link").value.trim();
+  if (!url) return;
+  const [ok, j] = await postJSON("/requests", { url, deck: $("linkdeck").value });
+  if (ok) { $("link").value = ""; $("link").blur(); say(`Song #${j.request.id} added. Now ask your AI to chop it (AGENTS.md).`); pollRequests(true); }
+  else say(j.error || "could not add that link");
+};
+for (const d of Object.values(DECKS)) {
+  const el = $(`deck-${d.id}`);
+  el.addEventListener("dragover", e => { e.preventDefault(); el.classList.add("drop"); });
+  el.addEventListener("dragleave", () => el.classList.remove("drop"));
+  el.addEventListener("drop", async e => {
+    e.preventDefault(); el.classList.remove("drop");
+    const f = e.dataTransfer.files[0];
+    if (!f) return;
+    say(`Uploading ${f.name}...`);
+    const r = await fetch(`/upload?name=${encodeURIComponent(f.name)}&deck=${d.id}`,
+                          { method: "POST", headers: { "X-VS": "1", "Content-Type": "application/octet-stream" }, body: f });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) { say(`Song #${j.request.id} added. Now ask your AI to chop it (AGENTS.md).`); pollRequests(true); }
+    else say(j.error || "upload failed");
+  });
+}
+let reqTimer = null;
+async function pollRequests(once) {
+  try {
+    const rs = (await (await fetch("/requests", { cache: "no-store" })).json()).requests.slice(-4);
+    const el = $("reqs");
+    el.textContent = "";
+    for (const r of rs) {
+      const span = document.createElement("span");
+      span.className = r.status;
+      const what = r.kind === "link" ? r.src.replace(/^https:\/\/(www\.)?/, "").slice(0, 40) : r.src;
+      span.textContent = `#${r.id} ${what}: ${r.status === "done" ? "on the pads" : r.status}${r.note ? " (" + r.note + ")" : ""}`;
+      el.append(span, document.createTextNode("   "));
+    }
+  } catch (e) { /* server restarting */ }
+  if (!once) { clearTimeout(reqTimer); reqTimer = setTimeout(pollRequests, 1500); }
+}
+
 $("start").onclick = async () => { await ctx.resume(); $("start").remove(); pushState(); };
 
 (async () => {
-  S.packs = (await (await fetch("/api/packs")).json()).packs;
-  if (!S.packs.length) { say("no flip packs found"); return; }
+  await refreshPacks();
+  if (!S.packs.length) {
+    say("no songs yet");
+    renderAll();
+    poll(); pollRequests();
+    return;
+  }
   const q = new URLSearchParams(location.search);
   const pick = w => S.packs.includes(w) ? w : S.packs[0];
   await Promise.all([loadPack(DECKS.L, pick(q.get("left"))), loadPack(DECKS.R, pick(q.get("right")))]);
   say("ready");
   pushState();
-  poll();
+  poll(); pollRequests();
 })();
 </script>
 </body>
