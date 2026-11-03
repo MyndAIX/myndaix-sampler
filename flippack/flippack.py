@@ -694,10 +694,10 @@ def main():
                  cut(full["vocals"][0], fsr, max(0, a - 0.01), b + 0.05, 5), fsr, subtype=subtype)
         bar_no = int(np.searchsorted(bars, a, side="right"))
         vrows.append((k + 1, round(a, 2), round(b - a, 2), bar_no))
-    if vrows:
-        chops["vocal16"] = (f"{len(vrows)} vocal phrases cut at breath gaps ({gap_db} dB down), in song order"
-                            + ("" if len(vrows) == 16 else
-                               f"; only {len(vrows)} found: the vocal has few clear gaps, so chop the rest by hand"))
+    chops["vocal16"] = (f"{len(vrows)} vocal phrases cut at breath gaps ({gap_db} dB down), in song order"
+                        if len(vrows) == 16 else
+                        f"only {len(vrows)} vocal phrases 0.3-3 s long found (best gap depth {gap_db} dB); "
+                        "chop the rest from the vocal loop or stem by hand")
 
     log("writing PACK.md + ARRANGE.md")
     fmt = lambda t: f"{int(t // 60)}:{t % 60:04.1f}"
