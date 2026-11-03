@@ -85,9 +85,9 @@
     <label>RIGHT <input type="range" id="vol-R" min="0" max="100" value="80" aria-label="right volume"><span class="num" id="vol-R-n">80</span></label>
   </div>
   <p class="help">
-    <b>Left pads:</b> 1 2 3 4 / Q W E R / A S D F / Z X C V &nbsp;·&nbsp; banks <b>Shift+1–4</b> (or fn+F1–F4) &nbsp;·&nbsp; pitch <b>G</b> up, <b>B</b> down, <b>T</b> reset &nbsp;·&nbsp; <b>5</b> sync<br>
-    <b>Right pads:</b> 7 8 9 0 / U I O P / J K L ; / M , . / &nbsp;·&nbsp; banks <b>Shift+7–0</b> (or fn+F5–F8) &nbsp;·&nbsp; pitch <b>H</b> up, <b>N</b> down, <b>Y</b> reset &nbsp;·&nbsp; <b>6</b> sync<br>
-    Pad 1 is bottom-left on each side. On a Mac keyboard hold <b>fn</b> with the F-keys (unless your F-keys are set to standard).
+    <b>Left pads:</b> 1 2 3 4 / Q W E R / A S D F / Z X C V &nbsp;·&nbsp; banks <b>Shift+1–4</b> &nbsp;·&nbsp; pitch <b>G</b> up, <b>B</b> down, <b>T</b> reset &nbsp;·&nbsp; <b>5</b> sync<br>
+    <b>Right pads:</b> 7 8 9 0 / U I O P / J K L ; / M , . / &nbsp;·&nbsp; banks <b>Shift+7–0</b> &nbsp;·&nbsp; pitch <b>H</b> up, <b>N</b> down, <b>Y</b> reset &nbsp;·&nbsp; <b>6</b> sync<br>
+    Pad 1 is bottom-left on each side.
     Pitch moves speed and pitch together, one semitone a step, like a classic sampler. In the loops bank a pad starts or stops its loop on the next bar.<br>
     <b>SYNC</b> on a deck makes it follow the other deck: same tempo (a slow song locks at half time), its loops land on the other deck's bar lines,
     and it keeps following when the other deck's pitch moves. Like a record, the key moves with the speed. Press SYNC again, or move that deck's pitch, to let go.
@@ -462,7 +462,7 @@ function renderDeck(d) {
   const row = document.createElement("div"); row.className = "row";
   BANK_ORDER.forEach((b, j) => {
     const btn = document.createElement("button");
-    btn.innerHTML = `<span class="fk">${d.fkeys[j]}</span>`;
+    btn.innerHTML = `<span class="fk">⇧${d.keys[12 + j]}</span>`;
     btn.append(b);
     btn.className = b === d.bank ? "on" : "";
     btn.disabled = !d.banks[b];
