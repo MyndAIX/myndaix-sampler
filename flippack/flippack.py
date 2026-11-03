@@ -526,6 +526,28 @@ def cut(data, sr, t0, t1, ms=2):
     return fade(data[a:b].copy(), sr, ms)
 
 
+def vocal_pieces(v, sr, n=16, lo=0.3, hi=3.0):
+    """The n loudest lo-hi s vocal phrases, in song order, and the gap depth (dB) that found them.
+
+    A phrase ends where the vocal falls gap_db below its peak. 30 dB finds clean breath gaps on a
+    dry modern vocal, but an old recording with reverb, or a stem carrying other parts' bleed, never
+    falls that far: send-me-a-postcard split into 12 pieces of 7-20 s, so 1 chop came out. Shallower
+    gaps are tried only while fewer than n pieces fit, so songs that already worked keep their chops.
+    """
+    best = ([], 30)
+    for gap_db in (30, 24, 20, 16):
+        cand = []
+        for a, b in librosa.effects.split(v, top_db=gap_db, frame_length=2048, hop_length=512):
+            if lo <= (b - a) / sr <= hi:
+                cand.append((float(np.sqrt(np.mean(v[a:b] ** 2))), a / sr, b / sr))
+        if len(cand) > len(best[0]):
+            best = (cand, gap_db)
+        if len(cand) >= n:
+            break
+    cand, gap_db = best
+    return sorted(sorted(cand, reverse=True)[:n], key=lambda c: c[1]), gap_db
+
+
 def conform(x, sr, n, ms=2):
     """-> (x as exactly n samples, % it was stretched). Loops are cut between tracked bar lines, which
     wobble on songs that drift or confuse the beat tracker (Benga's loops came out 13.1-13.7 s), and
@@ -665,14 +687,7 @@ def main():
                      cut(md, msr, t0 + k * beat, t0 + (k + 1) * beat, 3), msr,
                      subtype=sf.info(str(mixwav)).subtype)
         chops["mix16"] = f"16 one-beat hits of the full mix, in order (bar {mi + 1})"
-    # vocal phrases: split at gaps, keep the 16 loudest 0.3-3 s pieces, in song order
-    iv = librosa.effects.split(y["vocals"], top_db=30, frame_length=2048, hop_length=512)
-    cand = []
-    for a, b in iv:
-        d = (b - a) / SR
-        if 0.3 <= d <= 3.0:
-            cand.append((float(np.sqrt(np.mean(y["vocals"][a:b] ** 2))), a / SR, b / SR))
-    cand = sorted(sorted(cand, reverse=True)[:16], key=lambda c: c[1])
+    cand, gap_db = vocal_pieces(y["vocals"], SR)
     vrows = []
     for k, (_, a, b) in enumerate(cand):
         sf.write(str(tmp / f"chops/vocal16/vocal {k + 1:02d}.wav"),
@@ -680,7 +695,9 @@ def main():
         bar_no = int(np.searchsorted(bars, a, side="right"))
         vrows.append((k + 1, round(a, 2), round(b - a, 2), bar_no))
     if vrows:
-        chops["vocal16"] = f"{len(vrows)} vocal phrases cut at breath gaps, in song order"
+        chops["vocal16"] = (f"{len(vrows)} vocal phrases cut at breath gaps ({gap_db} dB down), in song order"
+                            + ("" if len(vrows) == 16 else
+                               f"; only {len(vrows)} found: the vocal has few clear gaps, so chop the rest by hand"))
 
     log("writing PACK.md + ARRANGE.md")
     fmt = lambda t: f"{int(t // 60)}:{t % 60:04.1f}"

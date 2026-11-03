@@ -242,6 +242,20 @@ for off in (0.0, 0.01, -0.05, 0.0002):
     check(f"conform {off:+.2%} cut -> exactly n samples, stretch {pct:+.2f}%",
           y.shape == (n, 2) and (abs(pct) > 0.05) == (abs(off) > 0.0005) and np.isfinite(y).all())
 
+# vocal chops: 20 one-second sung phrases with 0.4 s gaps. Clean gaps keep the old 30 dB cut;
+# gaps only 22 dB down (reverb, bleed: send-me-a-postcard gave 1 chop) step down until 16 fit
+def vox(gap_rms, seed=7):
+    t = np.arange(fp.SR) / fp.SR
+    gap = gap_rms * np.random.default_rng(seed).standard_normal(int(0.4 * fp.SR))
+    return np.concatenate([np.concatenate([0.5 * np.sin(2 * np.pi * 220 * t), gap]) for _ in range(20)]).astype("float32")
+for gap_rms, want in ((0.0, 30), (0.5 / np.sqrt(2) * 10 ** (-22 / 20), 20)):   # sine RMS = 0.5/sqrt(2)
+    got, db = fp.vocal_pieces(vox(gap_rms), fp.SR)
+    starts = [c[1] for c in got]
+    check(f"vocal chops, gaps {'silent' if not gap_rms else '22 dB down'}: {len(got)} phrases at {db} dB (want 16 at {want})",
+          len(got) == 16 and db == want and starts == sorted(starts) and all(0.9 < c[2] - c[1] < 1.1 for c in got))
+got, db = fp.vocal_pieces(np.full(fp.SR * 20, 0.3, "float32"), fp.SR)
+check("vocal with no gaps at all: no chops, no crash", got == [])
+
 sf.write(lib / "silent.wav", np.zeros((44100 * 30, 2), "float32"), 44100)
 check("silent audio refused before splitting", "silent" in exits(fp.check_audio, lib / "silent.wav"))
 song(lib / "short.wav", 5, 0)
