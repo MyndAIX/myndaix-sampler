@@ -19,8 +19,12 @@ class Src {
   constructor() { this.playbackRate = new Param(1); this.startT = null; this.stopT = Infinity; audio.srcs.push(this); }
   connect() {}
   // Web Audio: a start or stop time in the past means now; a later stop() call replaces the earlier one
-  start(t = 0, off = 0) { this.startT = Math.max(t, audio.currentTime); this.off = off; }
-  stop(t = 0) { this.stopT = Math.max(t, audio.currentTime); }
+  start(t = 0, off = 0) {
+    if (this.startT !== null) throw new Error("start() called twice");   // Web Audio throws too
+    this.startT = Math.max(t, audio.currentTime); this.off = off;
+  }
+  // once a source has ended, stop() changes nothing (no coming back to life)
+  stop(t = 0) { if (audio.currentTime < this.stopT) this.stopT = Math.max(t, audio.currentTime); }
   sounding(T) { return this.startT !== null && this.startT <= T && T < this.stopT; }
   // seconds into the buffer at T, following every rate change since the start
   pos(T) {
@@ -93,7 +97,7 @@ function phases(T) {
 const close = (a, b) => { const d = Math.abs(a - b) % 1; return Math.min(d, 1 - d) < 1e-6; };
 function locked(name, T, wantFollow = 1) {
   const { lead, follow } = phases(T);
-  const ok = lead.length > 0 && follow.length === wantFollow && follow.every(p => close(p, lead[0]));
+  const ok = lead.length > 0 && follow.length === wantFollow && [...lead, ...follow].every(p => close(p, lead[0]));
   check(name, ok, `leader ${lead.map(x => x.toFixed(4))} follower ${follow.map(x => x.toFixed(4))}`);
 }
 
@@ -138,6 +142,16 @@ at(0); loop(L); loop(L, FILES[1]);
 at(0.5); loop(L);          // stops on the bar at 2
 at(1); stop(L);
 check("stop reaches a loop that was stopping on the next bar", sounding(L, 1.5).length === 0);
+
+// review #2: a loop switched on and off before its bar line, then the leader slows down
+setup(16, 16);
+at(0); loop(L);
+at(0.1); app.syncTo(R);
+at(0.5); loop(R);
+at(0.6); loop(R);
+at(1); app.setPitch(L, -12);
+check("a loop cancelled before its bar line never sounds, even after a speed change",
+      audio.srcs.filter(s => s.deck === "R").every(s => !s.sounding(2.5) && !s.sounding(3)));
 
 // 5. review P1: ×2/÷2 that leaves the grids between each other's bar lines
 setup(16, 32);             // L 2 s bars, R 4 s bars (half time under L)

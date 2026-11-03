@@ -213,6 +213,9 @@ function toggleLoop(d, f) {
 // A loop source that keeps sounding until `until` (a bar line), tracked so a stop, a pack load or a
 // speed change still reaches it.
 function retire(d, src, until) {
+  // not started yet: cancel it now. Kept, its start would stay at the old speed's time while a
+  // speed change moved its stop, and it would sound off the grid.
+  if (src.startAt > ctx.currentTime) { src.onended = null; src.stop(); return; }
   src.until = until; src.stop(until);
   d.tails.add(src); src.onended = () => d.tails.delete(src);
 }
@@ -222,6 +225,7 @@ function startLoop(d, f, at) {
   src.buffer = buf(d, f); src.loop = true; src.playbackRate.value = rate(d); src.connect(d.volGain);
   // join in phase with the deck's loops already running (all 8 bars long)
   src.start(at, SM.loopPos(d.clock0, at, rate(d), src.buffer.duration));
+  src.startAt = at;
   d.loops[f] = { src, at };
 }
 
