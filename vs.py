@@ -13,6 +13,11 @@ Playing along:
   vs.py pad DECK 5             hit a pad (1-16, pad 1 bottom-left)
   vs.py pitch DECK -3          set a deck's pitch in semitones (-12..12; speed moves with it)
   vs.py load DECK <pack-slug>  load another pack on a deck
+  vs.py sync DECK              DECK follows the other deck's tempo and lands on its bar lines
+  vs.py sync off               stop syncing
+  vs.py bpmx DECK x2|half|x1   fix a tempo read at double or half speed (display, sync, launch)
+  vs.py vol DECK 80            deck volume 0-100
+  vs.py xfade 50               crossfader 0-100 (0 = only left, 100 = only right)
   vs.py stop                   stop all loops on both decks
   vs.py say "text"             show a message on the sampler screen
 """
@@ -136,8 +141,14 @@ def main(argv):
         return run(int(rest[0]))
     if cmd == "stop" and not rest:
         return send({"cmd": "stop"})
+    if cmd == "sync" and rest == ["off"]:
+        return send({"cmd": "sync", "deck": "off"})
+    if cmd == "xfade" and len(rest) == 1 and re.fullmatch(r"\d{1,3}", rest[0]) and int(rest[0]) <= 100:
+        return send({"cmd": "xfade", "value": int(rest[0])})
     if cmd == "say" and len(rest) == 1:
         return send({"cmd": "say", "text": rest[0]})
+    if cmd == "sync" and len(rest) == 1 and rest[0] in ("L", "R"):
+        return send({"cmd": "sync", "deck": rest[0]})
     if len(rest) == 2 and rest[0] in ("L", "R"):
         deck, arg = rest
         if cmd == "bank":
@@ -148,6 +159,10 @@ def main(argv):
             return send({"cmd": "pad", "deck": deck, "pad": int(arg)})
         if cmd == "pitch" and re.fullmatch(r"[+-]?\d{1,2}", arg) and -12 <= int(arg) <= 12:
             return send({"cmd": "pitch", "deck": deck, "semis": int(arg)})
+        if cmd == "vol" and re.fullmatch(r"\d{1,3}", arg) and int(arg) <= 100:
+            return send({"cmd": "vol", "deck": deck, "value": int(arg)})
+        if cmd == "bpmx" and arg in ("x2", "half", "x1"):
+            return send({"cmd": "bpmx", "deck": deck, "mul": {"x2": 2, "half": 0.5, "x1": 1}[arg]})
     print(__doc__, file=sys.stderr)
     return 2
 

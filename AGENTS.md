@@ -57,6 +57,10 @@ A failed request can be retried with `./vs.py run <id>`.
 ./vs.py pad L 5            # pad 1-16, pad 1 is bottom-left
 ./vs.py pitch R -2         # semitones, -12..12 (speed moves with it)
 ./vs.py load R <pack>      # any folder name under library/packs/
+./vs.py sync R             # R follows L's tempo and bar lines (sync off: let go)
+./vs.py bpmx R half        # x2 | half | x1: fix a tempo read at double or half speed
+./vs.py vol L 70           # deck volume 0-100
+./vs.py xfade 50           # crossfader 0-100, 0 = only the left deck
 ./vs.py stop               # stop all loops
 ./vs.py say "text"         # show a message on the sampler screen
 ```
@@ -67,11 +71,13 @@ In `state`, each hit says who made it (`you` = the person, `ai` = you) and how (
 | Path | What |
 |---|---|
 | `app/index.html` | the whole instrument (Web Audio, no build step) |
+| `app/sync.js` | the tempo-sync math, kept separate so `test.sh` can check it in node |
+| `tests/sim.js` | runs the page's script in node on a fake audio clock (sync timing, stops); `test.sh` calls it |
 | `serve.py` | local server: the app, the packs, the command queue, song requests, uploads (127.0.0.1 only) |
 | `vs.py` | your command line for all of the above |
 | `flippack/flippack.py` | the chopper: song -> stems -> 8-bar loops + 16-chop banks + tempo, key and sections |
 | `flip.sh` | runs the chopper in `.venv` (`vs.py run` calls it) |
 | `setup.sh`, `run.sh`, `config.sh` | setup, start, shared settings |
-| `test.sh` | fast server check (~3 s, no songs needed); run it after changing `serve.py` or `vs.py` |
+| `test.sh` | fast check (server, `vs.py`, sync math; the chopper too once `.venv` exists); run it after any change |
 | `library/` | made on this machine: `inbox/` dropped files, `downloads/`, `songs/` (the chopper's audio), `stems/`, `packs/`, `requests.json` |
 | `local.env` | optional, not committed: `SAMPLER_HOME=` to keep the library elsewhere, `VS_VENV=` for another venv |

@@ -27,6 +27,9 @@ with wave.open(str(pack / "chops" / "synth16" / "synth 01.wav"), "wb") as w:
     w.setnchannels(1); w.setsampwidth(2); w.setframerate(22050)
     w.writeframes(struct.pack("<2205h", *([1000, -1000] * 1102 + [0])))
 (pack / "analysis.json").write_text(json.dumps({"bpm": 120, "barlen": 2.0, "files": ["chops/synth16/synth 01.wav"]}))
+# a pack moved aside by a --force re-chop: on disk, never in the deck menu
+old = pack.parent / "test-pack.prev-20260101-000000"
+old.mkdir(); (old / "analysis.json").write_text((pack / "analysis.json").read_text())
 PY
 
 SAMPLER_HOME="$LIB" python3 -I "$HERE/serve.py" "$PORT" > /dev/null 2>&1 &
@@ -71,7 +74,7 @@ c, _ = req("/api/packs", headers={"Host": f"localhost:{port}"}); check("Host loc
 secret = lib / "secret"; secret.mkdir(); (secret / "key.txt").write_text("SECRET")
 (lib / "packs" / "leak").symlink_to(secret)
 c, b = req("/packs/leak/key.txt"); check("symlink out of packs/ not served", c == 404 and b"SECRET" not in b)
-c, b = req("/api/packs"); check("packs listed", c == 200 and json.loads(b)["packs"] == ["test-pack"])
+c, b = req("/api/packs"); check("packs listed, .prev- copies hidden", c == 200 and json.loads(b)["packs"] == ["test-pack"])
 c, b = req("/packs/test-pack/chops/synth16/synth%2001.wav"); check("a chop wav is served", c == 200 and b[:4] == b"RIFF")
 for p in ("/packs/../../../../etc/passwd", "/packs/%2e%2e/%2e%2e/%2e%2e/etc/passwd", "/../../etc/passwd"):
     c, b = req(p); check(f"traversal blocked: {p}", b"root:" not in b)
@@ -90,6 +93,18 @@ c, b = req("/state"); check("state round-trips", json.loads(b).get("bank") == "m
 check("vs.py rejects pad 17", vs("pad", "L", "17").returncode == 2)
 check("vs.py rejects deck X", vs("pitch", "X", "2").returncode == 2)
 check("vs.py pitch L -3 queues", vs("pitch", "L", "-3").returncode == 0)
+for a in (["sync", "R"], ["sync", "off"], ["vol", "L", "0"], ["vol", "R", "100"], ["xfade", "0"], ["xfade", "100"],
+          ["bpmx", "R", "x2"], ["bpmx", "L", "half"], ["bpmx", "L", "x1"]):
+    check(f"vs.py {' '.join(a)} queues", vs(*a).returncode == 0)
+for a in (["sync", "X"], ["sync"], ["sync", "L", "R"], ["vol", "L", "101"], ["vol", "L", "-1"], ["vol", "L", "8.5"],
+          ["xfade", "101"], ["xfade", "L", "50"], ["bpmx", "R", "x3"], ["bpmx", "R", "2"]):
+    check(f"vs.py rejects {' '.join(a)}", vs(*a).returncode == 2)
+c, b = req(f"/control?after=0"); cmds = json.loads(b)["cmds"]
+check("queue has sync R, vol, xfade and bpmx as the page reads them",
+      {"cmd": "sync", "deck": "R"} in [{k: x[k] for k in ("cmd", "deck") if k in x} for x in cmds]
+      and any(x.get("cmd") == "vol" and x.get("value") == 100 for x in cmds)
+      and any(x.get("cmd") == "xfade" and x.get("value") == 0 for x in cmds)
+      and any(x.get("cmd") == "bpmx" and x.get("mul") == 0.5 for x in cmds))
 
 # song requests: links
 ok_url = "https://www.youtube.com/watch?v=abc123&t=30s"
@@ -147,6 +162,51 @@ PY
 
 # the chopper's guards, only if setup.sh has made the Python environment
 VENV_PY="$(bash -c '. "$1/config.sh"; echo "$VS_VENV/bin/python"' _ "$HERE")"
+# sync math (app/sync.js), the numbers from the real packs: Benga 1.71828 s bars, Postcard 3.13469 s
+if command -v node > /dev/null 2>&1; then
+  node - "$HERE/app/sync.js" <<'JS' || exit 1
+const SM = require(process.argv[2]);
+let bad = 0;
+const check = (name, ok) => { console.log((ok ? "PASS  " : "FAIL  ") + name); if (!ok) bad = 1; };
+const near = (a, b, e = 1e-9) => Math.abs(a - b) < e;
+const onGrid = (t, c0, step) => near((t - c0) / step, Math.round((t - c0) / step), 1e-6);
+const benga = 1.71828, postcard = 3.13469;
+check("bar = loop_seconds / 8, barlen for old packs, ÷ mul",
+      near(SM.bar({ loop_seconds: 8 * benga, barlen: 9 }), benga) && SM.bar({ barlen: 2 }) === 2 && SM.bar({ barlen: 2 }, 2) === 1);
+let m = SM.fold(postcard, benga), r = SM.solve(postcard, benga, m);
+check(`Postcard follows Benga at half time: m=${m}, rate ${((r - 1) * 100).toFixed(1)}%`, m === 2 && near(r, 0.91216, 1e-5));
+check("its real bar is exactly 2 Benga bars", near(postcard / r, 2 * benga));
+m = SM.fold(benga, postcard); r = SM.solve(benga, postcard, m);
+check(`swapped, Benga follows Postcard at double time: m=${m}, rate +${((r - 1) * 100).toFixed(1)}%`,
+      m === 0.5 && near(benga / r, postcard / 2));
+check("same tempo folds to 1, rate 1", SM.fold(2, 2) === 1 && SM.solve(2, 2, 1) === 1);
+// leader runs from 0; follower joins on the leader's bar line after t=5
+const L = { c0: 0, r: 1 }, F = { r: SM.solve(postcard, benga, 2) };
+F.c0 = SM.lineAfter(L.c0, benga / L.r, 5);
+check("follower starts on a leader bar line", F.c0 >= 5 && onGrid(F.c0, L.c0, benga));
+let ok = true;
+for (let n = 0; n < 32; n++) ok = ok && onGrid(F.c0 + n * postcard / F.r, L.c0, benga / L.r);
+check("32 follower bar lines all sit on leader bar lines (grids nest)", ok);
+// leader pitch +2 at t=20.37: both re-anchor at the same instant, follower re-solves with m kept
+const now = 20.37, rL = Math.pow(2, 2 / 12);
+const rF = SM.solve(postcard, benga / rL, 2);
+const posL = (now - L.c0) * L.r, posF = (now - F.c0) * F.r;
+L.c0 = SM.reanchor(L.c0, now, L.r, rL); F.c0 = SM.reanchor(F.c0, now, F.r, rF); L.r = rL; F.r = rF;
+check("re-anchor keeps the music where it was", near((now - L.c0) * L.r, posL) && near((now - F.c0) * F.r, posF));
+ok = true;
+for (let n = 0; n < 32; n++) ok = ok && onGrid(F.c0 + n * postcard / F.r, L.c0, benga / L.r);
+check("after a leader pitch change the follower's bars still sit on the leader's", ok && near(postcard / F.r, 2 * benga / rL));
+check("lineAfter: a time on a line stays on it", SM.lineAfter(0, 2, 4) === 4 && SM.lineAfter(0, 2, 4.001) === 6);
+check("loopPos wraps negative times", near(SM.loopPos(10, 9, 1, 4), 3));
+check("nearestBar rounds and wraps the loop end to bar 0", SM.nearestBar(7.9, 1, 8) === 0 && SM.nearestBar(2.4, 1, 8) === 2);
+process.exit(bad);
+JS
+  # the page's own script on a fake audio clock: loops on the right bar phase, nothing left sounding
+  node "$HERE/tests/sim.js" "$HERE" || exit 1
+else
+  echo "SKIP  sync math (node not installed)"
+fi
+
 if [ -x "$VENV_PY" ]; then
   SAMPLER_HOME="$LIB/chop" "$VENV_PY" -I - "$HERE" "$LIB/chop" <<'PY'
 import os, signal, subprocess, sys
@@ -173,6 +233,14 @@ def song(path, secs, seed):
     x = 0.05 * rng.standard_normal((44100 * secs, 2)).astype("float32")
     x[:: 22050] = 0.9
     sf.write(path, x, 44100)
+
+# every loop is conformed to exactly 8 bars, whatever the detected bar lines gave
+n = 44100 * 4
+for off in (0.0, 0.01, -0.05, 0.0002):
+    x = 0.1 * np.random.default_rng(5).standard_normal((int(n * (1 + off)), 2))
+    y, pct = fp.conform(x, 44100, n)
+    check(f"conform {off:+.2%} cut -> exactly n samples, stretch {pct:+.2f}%",
+          y.shape == (n, 2) and (abs(pct) > 0.05) == (abs(off) > 0.0005) and np.isfinite(y).all())
 
 sf.write(lib / "silent.wav", np.zeros((44100 * 30, 2), "float32"), 44100)
 check("silent audio refused before splitting", "silent" in exits(fp.check_audio, lib / "silent.wav"))

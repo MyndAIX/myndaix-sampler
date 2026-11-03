@@ -31,6 +31,7 @@ No AI? Do it by hand: `./setup.sh` once, `./run.sh` to start, and `./vs.py run 1
 | Pads 1-4 / 5-8 / 9-12 / 13-16 | Z X C V / A S D F / Q W E R / 1 2 3 4 | M , . / / J K L ; / U I O P / 7 8 9 0 |
 | Banks: loops, synth16, mix16, vocal16 | F1 F2 F3 F4 | F5 F6 F7 F8 |
 | Pitch up / down / reset | G / B / T | H / N / Y |
+| Sync to the other deck | 5 | 6 |
 
 - Pad 1 is bottom-left on each side. Space stops all loops.
 - On a Mac keyboard, hold **fn** with the F-keys unless they're set to standard.
@@ -38,6 +39,12 @@ No AI? Do it by hand: `./setup.sh` once, `./run.sh` to start, and `./vs.py run 1
 - In the loops bank, a pad starts or stops its loop on the next bar, in time with the loops already running.
 - Each deck has a waveform screen: the sample you just hit, with a playhead.
 - Each deck can hold a different song (menu at the top of the deck).
+- **SYNC** makes that deck follow the other one: same tempo, and its loops land on the other deck's bar
+  lines. A slow song locks at half time (77 BPM under 140) instead of being sped up. It keeps following
+  when the other deck's pitch moves. Like a record, the key moves with the speed. Press SYNC again, or
+  move that deck's own pitch, to let go.
+- **×2 / ÷2** fix a tempo that was read at double or half speed.
+- The mixer under the decks: a volume per deck and a crossfader (full left mutes the right deck).
 
 ## What a song turns into
 
@@ -67,7 +74,7 @@ songs and play along. `flippack/flippack.py` does the chopping with
 [librosa](https://librosa.org) (tempo, beats, key) and [yt-dlp](https://github.com/yt-dlp/yt-dlp)
 (downloads). `./test.sh` checks the server in about 3 seconds.
 
-Not built yet: a mixer (crossfader, tempo sync between decks), recording, saving a session.
+Not built yet: key lock (tempo change without the key moving), recording, saving a session.
 MIDI pads are mapped (notes 36-51 left, 52-67 right) but untested on real hardware.
 
 ## License

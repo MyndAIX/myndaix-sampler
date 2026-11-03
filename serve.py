@@ -34,7 +34,7 @@ HOME = Path(os.environ.get("SAMPLER_HOME") or DEFAULT_HOME)
 PACKS, INBOX = HOME / "packs", HOME / "inbox"
 REQ_FILE = HOME / "requests.json"
 PORT = 8765
-COMMANDS = {"bank", "pad", "load", "stop", "say", "pitch"}
+COMMANDS = {"bank", "pad", "load", "stop", "say", "pitch", "sync", "vol", "xfade", "bpmx"}
 MAX_BODY = 4096
 MAX_UPLOAD = 300 * 1024 * 1024
 AUDIO_EXT = {".wav", ".mp3", ".m4a", ".flac", ".aif", ".aiff", ".ogg"}
@@ -120,7 +120,8 @@ class Handler(SimpleHTTPRequestHandler):
         u = urlparse(self.path)
         if u.path == "/api/packs":
             packs = sorted(d.name for d in PACKS.iterdir()
-                           if d.is_dir() and not d.name.startswith((".", "_")) and (d / "analysis.json").exists())
+                           if d.is_dir() and not d.name.startswith((".", "_")) and ".prev-" not in d.name
+                           and (d / "analysis.json").exists())
             return self.send_json({"packs": packs})
         if u.path == "/control":
             try:
