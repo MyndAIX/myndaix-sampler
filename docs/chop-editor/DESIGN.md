@@ -30,8 +30,10 @@ Not built here: transient slicing, time-stretch, a sample-start knob, and per-pa
 1. **One server validator, `pack_paths(slug)`**, used by every new route. It requires:
    - the slug matches `^[a-z0-9][a-z0-9-]{0,79}$` and contains no `.prev-`;
    - `packs/<slug>/analysis.json` exists;
-   - `songs/<slug>.source` exists. Without a marker the pack can be viewed but not saved to:
-     a missing marker never counts as a match.
+   - Path checks only. Whether a save or mine playback is allowed is a separate check,
+     `owner_ok(slug, owner)`. It requires `songs/<slug>.source` to exist and to equal the given
+     owner; a missing marker never matches. Without a marker the wave can be viewed, but the pack
+     can't be saved to and its mine bank isn't listed. A known mismatch is always refused.
    - The resolved pack, stem, song and mine paths each stay inside their own root (`inside()`, which
      resolves symlinks).
 
@@ -81,8 +83,9 @@ Not built here: transient slicing, time-stretch, a sample-start knob, and per-pa
      Nothing is stretched. Deck pitch and sync still play it faster or slower like every other pad,
      the classic sampler behavior.
    - **Commit.**
-     - The cut is written to a new, never-reused name: `mine/<slug>/p05-r0007.wav`, from the
-       manifest's revision counter.
+     - The cut is written to a new name, created exclusively (`O_EXCL`):
+       `mine/<slug>/p05-r0007-<6 random hex>.wav`. An orphan left by a crash before the commit is
+       never overwritten or reused, and stays on disk.
      - That file is fsynced.
      - The new manifest goes to `regions.json.tmp`, is fsynced, then renamed onto `regions.json`,
        and the directory is fsynced.
@@ -109,7 +112,9 @@ Not built here: transient slicing, time-stretch, a sample-start knob, and per-pa
      changed files and swaps a 16-slot array in place, with no sort and no compaction, so pad 5
      stays pad 5.
    - Revisioned file names are the cache keys, so stale audio can't replay.
-   - It drops the result if the deck's pack changed while it was decoding.
+   - Each deck has a refresh generation that goes up on every refresh and pack load. A result whose
+     generation is stale is dropped before it touches the bank, so a slow rev 7 can't overwrite
+     rev 8.
    - Loops, sync and the chosen bank are untouched, and superseded buffers are released.
    - It runs on pack load, on window focus, and on a `mine` hint for the deck's pack (both decks if
      both show it).
@@ -140,8 +145,9 @@ Not built here: transient slicing, time-stretch, a sample-start knob, and per-pa
 | Editor open while its slug changes song | `owner` token mismatch returns 409 "this pack changed, reload". |
 | Save during a chop | 409 busy, nothing written. |
 | Crash or drive pull mid-save | Before the manifest rename nothing changed; after it the pad is whole. A leftover tmp or new WAV is ignored. |
-| Two saves at once, different pads | Serialized by the slug lock; both land and rev goes up by 2. Tested. |
-| Not 16-bit PCM, no `.source`, stems missing | View only, with the reason shown. Existing mine WAVs still play. |
+| Two saves at once | The non-blocking slug lock gives one of them 409 "pack busy". The editor retries once after 300 ms. Tested: the retry lands, both pads are kept, and rev goes up by 2. |
+| Not 16-bit PCM, or stems missing | View only, with the reason shown. Existing mine WAVs still play. |
+| No `.source` marker | View only. mine is not listed or played: there is no owner to match. |
 | Bad numbers, pad, stem, slug, traversal | 400 or 404 with the reason. Tested with encoded `..`, symlinks, HEAD, a missing X-VS and a foreign Origin. |
 
 ## Security surface
@@ -156,12 +162,14 @@ Not built here: transient slicing, time-stretch, a sample-start knob, and per-pa
 ## Fast loop
 - `test.sh`, server: validator rejections; the exact frame count `b − a` and zeroed edges on a
   fixture PCM16 stem; 409 busy while the slug lock is held; 409 on a stale owner; an interrupted
-  commit (tmp left, no rename) leaves the old manifest live; concurrent saves to two pads; clear
+  commit (tmp left, no rename) leaves the old manifest live, and a retry after a crash keeps the
+  orphan WAV and uses a new name; overlapping saves give 409 then land on retry; clear
   keeps the old WAV; GET whitelist and traversal; a float WAV gives "can't save".
 - `test.sh`, flippack: `--force` on the fixture leaves `mine/` byte-identical; slug handed to
   another song moves `mine/` (success, plus failure partway then retry); `taken()` sees `mine/`.
 - `tests/sim.js`: snapping on a drifting grid and a partial last bar; `refreshMine` keeps pad slots,
-  cache keys and the playing state; Shift+5/6 pick mine, and plain 5/6 still sync.
+  cache keys and the playing state, and refreshes finishing in reverse order keep the newest;
+  Shift+5/6 pick mine, and plain 5/6 still sync.
 - Headless (Playwright): the done-test end to end on Postcard. Jefe's ear is last.
 
 ## Deliberately not built (v1)
@@ -185,5 +193,9 @@ All 12 findings are folded:
 - 10: Shift+5/6.
 - 11: frames recorded, `b − a`, partial bar, beats approximate.
 - 12: the pitch behavior stated, `+bars` and rebuild deferred, timing promises dropped.
+
+Re-review KilaBz 991c04b2 (APPROVE-WITH-CHANGES): 4 more folded. The WAV is created exclusively
+with a random suffix; each deck has a refresh generation; path checks are split from `owner_ok`;
+overlapping saves get 409 and a retry.
 
 Oracle could not run: Gemini quota on the Mini is exhausted, resetting about 2026-11-08.
