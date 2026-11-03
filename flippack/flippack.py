@@ -526,13 +526,15 @@ def cut(data, sr, t0, t1, ms=2):
     return fade(data[a:b].copy(), sr, ms)
 
 
-def vocal_pieces(v, sr, n=16, lo=0.3, hi=3.0):
-    """The n loudest lo-hi s vocal phrases, in song order, and the gap depth (dB) that found them.
+def vocal_pieces(v, sr, n=16, lo=0.3, hi=3.0, enough=8):
+    """Up to n loudest lo-hi s vocal phrases, in song order, and the gap depth (dB) that found them.
 
     A phrase ends where the vocal falls gap_db below its peak. 30 dB finds clean breath gaps on a
     dry modern vocal, but an old recording with reverb, or a stem carrying other parts' bleed, never
-    falls that far: send-me-a-postcard split into 12 pieces of 7-20 s, so 1 chop came out. Shallower
-    gaps are tried only while fewer than n pieces fit, so songs that already worked keep their chops.
+    falls that far: send-me-a-postcard split into 12 pieces of 7-20 s, so 1 chop came out.
+    Shallower gaps are tried ONLY while fewer than `enough` phrases fit, i.e. the vocal wasn't
+    chopped at all. Never to fill all n pads: Jefe's call (2026-11-03) is natural phrases, untouched,
+    and empty pads are fine. Each shallower step cuts at smaller dips, closer to mid-phrase.
     """
     best = ([], 30)
     for gap_db in (30, 24, 20, 16):
@@ -542,7 +544,7 @@ def vocal_pieces(v, sr, n=16, lo=0.3, hi=3.0):
                 cand.append((float(np.sqrt(np.mean(v[a:b] ** 2))), a / sr, b / sr))
         if len(cand) > len(best[0]):
             best = (cand, gap_db)
-        if len(cand) >= n:
+        if len(cand) >= enough:
             break
     cand, gap_db = best
     return sorted(sorted(cand, reverse=True)[:n], key=lambda c: c[1]), gap_db
@@ -694,10 +696,8 @@ def main():
                  cut(full["vocals"][0], fsr, max(0, a - 0.01), b + 0.05, 5), fsr, subtype=subtype)
         bar_no = int(np.searchsorted(bars, a, side="right"))
         vrows.append((k + 1, round(a, 2), round(b - a, 2), bar_no))
-    chops["vocal16"] = (f"{len(vrows)} vocal phrases cut at breath gaps ({gap_db} dB down), in song order"
-                        if len(vrows) == 16 else
-                        f"only {len(vrows)} vocal phrases 0.3-3 s long found (best gap depth {gap_db} dB); "
-                        "chop the rest from the vocal loop or stem by hand")
+    chops["vocal16"] = (f"{len(vrows)} vocal phrases cut at breath gaps ({gap_db} dB down), in song order, "
+                        "never stretched" + (f"; pads {len(vrows) + 1}-16 stay empty" if len(vrows) < 16 else ""))
 
     log("writing PACK.md + ARRANGE.md")
     fmt = lambda t: f"{int(t // 60)}:{t % 60:04.1f}"

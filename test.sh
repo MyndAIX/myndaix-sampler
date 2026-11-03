@@ -243,7 +243,7 @@ for off in (0.0, 0.01, -0.05, 0.0002):
           y.shape == (n, 2) and (abs(pct) > 0.05) == (abs(off) > 0.0005) and np.isfinite(y).all())
 
 # vocal chops: 20 one-second sung phrases with 0.4 s gaps. Clean gaps keep the old 30 dB cut;
-# gaps only 22 dB down (reverb, bleed: send-me-a-postcard gave 1 chop) step down until 16 fit
+# gaps only 22 dB down (reverb, bleed: send-me-a-postcard gave 1 chop) step shallower, since none fit
 def vox(gap_rms, seed=7):
     t = np.arange(fp.SR) / fp.SR
     gap = gap_rms * np.random.default_rng(seed).standard_normal(int(0.4 * fp.SR))
@@ -253,6 +253,11 @@ for gap_rms, want in ((0.0, 30), (0.5 / np.sqrt(2) * 10 ** (-22 / 20), 20)):   #
     starts = [c[1] for c in got]
     check(f"vocal chops, gaps {'silent' if not gap_rms else '22 dB down'}: {len(got)} phrases at {db} dB (want 16 at {want})",
           len(got) == 16 and db == want and starts == sorted(starts) and all(0.9 < c[2] - c[1] < 1.1 for c in got))
+# 10 phrases with clean gaps, then 10 joined by 22 dB gaps (one long stretch): 30 dB already gives
+# 10 natural phrases, so it stays there with 10 chops rather than cutting shallower to fill 16 pads
+mixed = np.concatenate([vox(0.0)[: len(vox(0.0)) // 2], vox(0.5 / np.sqrt(2) * 10 ** (-22 / 20))[len(vox(0.0)) // 2:]])
+got, db = fp.vocal_pieces(mixed, fp.SR)
+check(f"vocal chops: 10 natural phrases stay at 30 dB, no filling ({len(got)} at {db} dB)", len(got) == 10 and db == 30)
 got, db = fp.vocal_pieces(np.full(fp.SR * 20, 0.3, "float32"), fp.SR)
 check("vocal with no gaps at all: no chops, no crash", got == [])
 
