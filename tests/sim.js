@@ -44,9 +44,11 @@ const el = () => new Proxy({ classList: { add() {}, remove() {} }, dataset: {}, 
                                   typeof k === "string" ? (o[k] = () => {}) : undefined),
   set: (o, k, v) => { o[k] = v; return true; },
 });
+const listeners = {};
 const sandbox = {
   AudioContext: Ctx, console, Math, Promise, URLSearchParams, Object, Number, String, JSON, Array, Set, WeakMap, Float32Array,
-  document: { getElementById: () => el(), createElement: () => el(), addEventListener() {}, documentElement: {} },
+  document: { getElementById: () => el(), createElement: () => el(), documentElement: {},
+              addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); } },
   getComputedStyle: () => ({ getPropertyValue: () => "" }),
   requestAnimationFrame() {}, setTimeout() {}, clearTimeout() {},
   fetch: () => new Promise(() => {}),      // the page's start-up waits forever; the test drives it instead
@@ -197,5 +199,26 @@ app.syncTo(R); app.pressSync(L);
 check("SYNC on the leader swaps: L follows R", S.sync && S.sync.follower === "L");
 app.resetPitch(L);
 check("reset on the follower: sync off, speed back to 1", S.sync === null && L.fine === 1 && L.semis === 0);
+
+// 8. bank keys: Shift + the deck's top pad row (a Mac sends F-keys as brightness etc. unless fn is held)
+setup(16, 16);
+Object.assign(L.banks, { synth16: FILES, mix16: FILES, vocal16: FILES }); Object.assign(R.banks, L.banks);
+const press = (key, code, shiftKey = false) => {
+  let blocked = false;
+  for (const fn of listeners.keydown) fn({ key, code, shiftKey, target: { tagName: "BODY" }, preventDefault() { blocked = true; } });
+  return blocked;
+};
+press("@", "Digit2", true);
+check("Shift+2 picks the left deck's 2nd bank", L.bank === "synth16" && R.bank === "loops");
+press(")", "Digit0", true);
+check("Shift+0 picks the right deck's 4th bank", R.bank === "vocal16" && L.bank === "synth16");
+press("F3", "F3");
+check("fn+F3 still picks the left deck's 3rd bank", L.bank === "mix16");
+const PADS = Array.from({ length: 16 }, (_, i) => `mix16/p${i}.wav`);
+L.banks.mix16 = PADS; for (const f of PADS) app.cache[L.pack + "/" + f] = { duration: 1 };
+app.S.hits.length = 0; const hits = 0;   // the page keeps only the last 20 hits
+press("1", "Digit1");
+check("plain 1 still plays pad 13, not a bank", L.bank === "mix16" && app.S.hits.length === hits + 1
+      && app.S.hits[app.S.hits.length - 1].pad === 13);
 
 process.exit(bad);

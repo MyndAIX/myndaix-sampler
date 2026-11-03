@@ -85,8 +85,8 @@
     <label>RIGHT <input type="range" id="vol-R" min="0" max="100" value="80" aria-label="right volume"><span class="num" id="vol-R-n">80</span></label>
   </div>
   <p class="help">
-    <b>Left pads:</b> 1 2 3 4 / Q W E R / A S D F / Z X C V &nbsp;·&nbsp; banks <b>F1–F4</b> &nbsp;·&nbsp; pitch <b>G</b> up, <b>B</b> down, <b>T</b> reset &nbsp;·&nbsp; <b>5</b> sync<br>
-    <b>Right pads:</b> 7 8 9 0 / U I O P / J K L ; / M , . / &nbsp;·&nbsp; banks <b>F5–F8</b> &nbsp;·&nbsp; pitch <b>H</b> up, <b>N</b> down, <b>Y</b> reset &nbsp;·&nbsp; <b>6</b> sync<br>
+    <b>Left pads:</b> 1 2 3 4 / Q W E R / A S D F / Z X C V &nbsp;·&nbsp; banks <b>Shift+1–4</b> (or fn+F1–F4) &nbsp;·&nbsp; pitch <b>G</b> up, <b>B</b> down, <b>T</b> reset &nbsp;·&nbsp; <b>5</b> sync<br>
+    <b>Right pads:</b> 7 8 9 0 / U I O P / J K L ; / M , . / &nbsp;·&nbsp; banks <b>Shift+7–0</b> (or fn+F5–F8) &nbsp;·&nbsp; pitch <b>H</b> up, <b>N</b> down, <b>Y</b> reset &nbsp;·&nbsp; <b>6</b> sync<br>
     Pad 1 is bottom-left on each side. On a Mac keyboard hold <b>fn</b> with the F-keys (unless your F-keys are set to standard).
     Pitch moves speed and pitch together, one semitone a step, like a classic sampler. In the loops bank a pad starts or stops its loop on the next bar.<br>
     <b>SYNC</b> on a deck makes it follow the other deck: same tempo (a slow song locks at half time), its loops land on the other deck's bar lines,
@@ -101,9 +101,9 @@
 const BANK_ORDER = ["loops", "synth16", "mix16", "vocal16"];
 // Pad 1 is bottom-left, as on Maschine. keys[i] plays pad i+1.
 const DECKS = {
-  L: { keys: ["z","x","c","v","a","s","d","f","q","w","e","r","1","2","3","4"], fkeys: ["F1","F2","F3","F4"],
+  L: { keys: ["z","x","c","v","a","s","d","f","q","w","e","r","1","2","3","4"], fkeys: ["F1","F2","F3","F4"], bankcodes: ["Digit1","Digit2","Digit3","Digit4"],
        up: "g", down: "b", reset: "t", defaultBank: "loops" },
-  R: { keys: ["m",",",".","/","j","k","l",";","u","i","o","p","7","8","9","0"], fkeys: ["F5","F6","F7","F8"],
+  R: { keys: ["m",",",".","/","j","k","l",";","u","i","o","p","7","8","9","0"], fkeys: ["F5","F6","F7","F8"], bankcodes: ["Digit7","Digit8","Digit9","Digit0"],
        up: "h", down: "n", reset: "y", defaultBank: "synth16" },
 };
 const ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "interactive" });
@@ -562,9 +562,12 @@ async function poll() {
 document.addEventListener("keydown", e => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (["SELECT", "INPUT", "TEXTAREA"].includes(e.target.tagName)) return;
-  // F-keys: block the browser's own use (F5 = reload) before anything else
+  // Bank keys. A Mac sends F1-F12 as brightness/volume/etc. unless fn is held, so the page never sees
+  // them by default; Shift + the deck's top pad row is the bank key that always arrives. e.code, because
+  // Shift turns e.key "1" into "!" (and differs per keyboard layout). F-keys: block the browser's own use
+  // (F5 = reload) before anything else.
   for (const d of Object.values(DECKS)) {
-    const j = d.fkeys.indexOf(e.key);
+    const j = Math.max(d.fkeys.indexOf(e.key), e.shiftKey ? d.bankcodes.indexOf(e.code) : -1);
     if (j >= 0) { e.preventDefault(); if (!e.repeat) setBank(d, BANK_ORDER[j]); return; }
   }
   if (e.repeat) return;
