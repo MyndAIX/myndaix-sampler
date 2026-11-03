@@ -574,7 +574,10 @@ document.addEventListener("keydown", e => {
   const k = e.key.toLowerCase();
   if (k === " ") { e.preventDefault(); Object.values(DECKS).forEach(stopLoops); pushState(); return; }
   for (const d of Object.values(DECKS)) {
-    const i = d.keys.indexOf(k);
+    // The top pad row also matches by key position: on AZERTY the unshifted digit row types & é " ',
+    // and Shift (which types the digits there) is taken by the bank keys above.
+    let i = d.keys.indexOf(k);
+    if (i < 0) { const c = d.bankcodes.indexOf(e.code); if (c >= 0) i = 12 + c; }
     if (i >= 0) { e.preventDefault(); hit(d, i, "you", "key"); return; }
     if (k === d.up) return setPitch(d, d.semis + 1);
     if (k === d.down) return setPitch(d, d.semis - 1);
