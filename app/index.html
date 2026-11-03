@@ -143,7 +143,10 @@ async function loadPack(d, slug) {
   stopLoops(d);
   if (S.sync) syncOff();
   d.mineGen++;                     // a bank fetch still running for the old pack must not land here
+  const old = d.pack;
+  delete d.banks.mine;
   d.pack = slug; d.fine = 1; d.mul = savedMul(slug); d.labels = {};
+  releaseMine(old);
   const meta = await (await fetch(`/packs/${encodeURIComponent(slug)}/analysis.json`, { cache: "no-store" })).json();
   const banks = {};
   for (const f of meta.files || []) {
@@ -179,23 +182,34 @@ async function refreshMine(d) {
   try { j = await (await fetch(`/api/mine/${encodeURIComponent(slug)}`, { cache: "no-store" })).json(); }
   catch (e) { return; }
   if (gen !== d.mineGen) return;
-  const sl = ChopMath.slots(j && j.pads), slots = new Array(16).fill(undefined), labels = {};
+  // Buffers are staged here (a decoded cut, or a hold on one already cached) and go into the shared
+  // cache only after the generation check, together with the slots, in one synchronous step. So an
+  // overtaken refresh adds nothing to the cache, and another deck's eviction while this one awaits
+  // can't leave a filled slot with no buffer: the staged hold puts it back.
+  const sl = ChopMath.slots(j && j.pads), slots = new Array(16).fill(undefined), labels = {}, staged = {};
   await Promise.all(sl.map(async (e, i) => {
     if (!e) return;
     const f = "mine/" + e.file, key = slug + "/" + f;
     try {
-      if (!cache[key]) cache[key] = await ctx.decodeAudioData(await (await fetch(`/mine/${encodeURIComponent(slug)}/${encodeURIComponent(e.file)}`)).arrayBuffer());
+      staged[key] = cache[key] || await ctx.decodeAudioData(await (await fetch(`/mine/${encodeURIComponent(slug)}/${encodeURIComponent(e.file)}`)).arrayBuffer());
       slots[i] = f; labels[f] = `${e.stem} ${ChopMath.clock(e.a / e.sr)}`;
     } catch (err) { /* this pad stays empty */ }
   }));
   if (gen !== d.mineGen) return;
+  Object.assign(cache, staged);
   if (slots.some(Boolean)) d.banks.mine = slots; else delete d.banks.mine;
   d.labels = labels;
-  // let go of cuts no deck on this pack uses any more (a sounding one keeps its own reference)
-  const used = new Set(Object.values(DECKS).filter(x => x.pack === slug).flatMap(x => (x.banks.mine || []).filter(Boolean)).map(f => slug + "/" + f));
-  for (const k of Object.keys(cache)) if (k.startsWith(slug + "/mine/") && !used.has(k)) delete cache[k];
+  releaseMine(slug);
   if (d.bank === "mine" && !d.banks.mine) d.bank = BANK_ORDER.find(b => d.banks[b]);
   renderDeck(d);
+}
+
+// Let go of a pack's cuts that no deck's installed bank uses any more (a sounding one keeps its own
+// reference). Only installed banks count: a refresh still in flight holds its buffers itself.
+function releaseMine(slug) {
+  if (!slug) return;
+  const used = new Set(Object.values(DECKS).filter(x => x.pack === slug).flatMap(x => (x.banks.mine || []).filter(Boolean)).map(f => slug + "/" + f));
+  for (const k of Object.keys(cache)) if (k.startsWith(slug + "/mine/") && !used.has(k)) delete cache[k];
 }
 
 // Bar clock per deck, in real seconds; at a changed pitch the bar is shorter or longer

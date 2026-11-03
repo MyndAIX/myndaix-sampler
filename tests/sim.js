@@ -230,21 +230,28 @@ check("AZERTY: Shift + the 1 key (types 1) picks bank 1, not a pad",
 // ---- chop editor grid math (app/chopmath.js) ----
 const CM = sandbox.ChopMath;
 {
-  // a drifting grid: bars 2.0, 2.1, 1.9 s long, first line at 0.5 s, song ends 0.7 s into a partial bar
-  const bars = [0.5, 2.5, 4.6, 6.5], dur = 7.2, lines = CM.barLines(bars, 2, dur);
+  // a drifting grid: bars 2.0, 2.1, 1.9 s long, first line at 0.5 s, song ends 0.7 s into a partial
+  // bar. Shaped like flippack's bars_s: its last entry is the song's end (Postcard: 158.59, 160.99)
+  const bars = [0.5, 2.5, 4.6, 6.5, 7.2], dur = 7.2, lines = CM.barLines(bars, 2, dur);
   check("bar lines: a pickup bar 0 before the first detected line, then 1..4 on the detected times",
         lines[0].bar === 0 && lines[0].t === 0 && lines.slice(1).map(l => l.t).join() === bars.join()
-        && lines.slice(1).map(l => l.bar).join() === "1,2,3,4");
+        && lines.slice(1, 5).map(l => l.bar).join() === "1,2,3,4");
+  check("... the song's end closes the grid: marked end, not a bar", lines[lines.length - 1].end === true && lines.length === 6);
+  const open = CM.barLines([0.5, 2.5], 2, 7.2);
+  check("no end marker: the grid runs on at the median bar", open.map(l => l.t).join() === "0,0.5,2.5,4.5,6.5");
   const bt = CM.beats(lines, 2, dur);
   check("beats are quarters of whichever bar they sit in", bt.includes(2.5 + 2.1 / 4) && bt.includes(4.6 + 1.9 / 2));
-  check("the partial last bar gets only the beats that fit, plus the song's end",
+  check("the partial last bar keeps the median beat spacing: only the beats that fit, plus the song's end",
         bt.filter(t => t >= 6.5).join() === [6.5, 7, 7.2].join());
+  const ob = CM.beats(open, 2, 7.2);
+  check("... and the open bar after the last line too", ob.filter(t => t >= 6.5).join() === [6.5, 7, 7.2].join());
   check("snap to beat on a drifting bar", Math.abs(CM.snap(2.5 + 2.1 / 4 + 0.05, "beat", lines, bt, dur) - (2.5 + 2.1 / 4)) < 1e-9);
   check("Shift snaps to the bar line", CM.snap(4.0, "bar", lines, bt, dur) === 4.6);
   check("Alt is free, clamped to the song", CM.snap(3.333, "free", lines, bt, dur) === 3.333 && CM.snap(99, "free", lines, bt, dur) === dur);
   check("the song's end is a snap target", CM.snap(7.15, "bar", lines, bt, dur) === dur);
   const w = CM.where(lines, 4.6 + 1.9 * 0.6);
   check("where: bar 3, beat 3", w.bar === 3 && w.beat === 3);
+  check("where in the partial last bar: bar 4, beat 2 at the median spacing", CM.where(lines, 7.1, 2).bar === 4 && CM.where(lines, 7.1, 2).beat === 2);
   check("clock reads m:ss.s", CM.clock(83.25) === "1:23.3" && CM.clock(5) === "0:05.0"
       && CM.clock(59.95) === "1:00.0" && CM.clock(119.97) === "2:00.0");
   const sl = CM.slots({ "5": { file: "a.wav" }, "16": { file: "b.wav" }, "17": { file: "c.wav" }, "0": { file: "d.wav" }, x: { file: "e" }, "3": { nofile: 1 } });
@@ -297,6 +304,31 @@ const bank = (rev, pads) => ({ slug: "postcard", rev, pads });
   await r;
   check("a pack load overtakes a running bank fetch", !pend.some(p => p.url.includes("p01-r0004")));
   L.pack = "postcard";
+
+  // a refresh overtaken while its audio decodes adds nothing to the shared cache
+  r = app.refreshMine(L);
+  await answer("/api/mine/postcard", bank(6, { "2": { file: "p02-r0006-eeeeee.wav", stem: "vocals", a: 0, b: 44100, sr: 44100 } }));
+  const r3 = app.refreshMine(L);
+  await answer("/mine/postcard/p02-r0006-eeeeee.wav", null); await r;
+  check("an overtaken refresh leaves nothing in the cache", !app.cache["postcard/mine/p02-r0006-eeeeee.wav"]);
+  await answer("/api/mine/postcard", bank(7, {})); await r3;
+
+  // two decks on one pack: the left waits on its second cut while the right installs an empty bank
+  // and lets go of the first cut; the left must still end up with both buffers
+  R.pack = "postcard"; R.banks = { loops: FILES }; R.bank = "loops"; R.labels = {};
+  r = app.refreshMine(R);
+  await answer("/api/mine/postcard", bank(8, { "1": { file: "p01-r0008-xxxxxx.wav", stem: "vocals", a: 0, b: 44100, sr: 44100 } }));
+  await answer("/mine/postcard/p01-r0008-xxxxxx.wav", null); await r;
+  const XY = { "1": { file: "p01-r0008-xxxxxx.wav", stem: "vocals", a: 0, b: 44100, sr: 44100 },
+               "2": { file: "p02-r0009-yyyyyy.wav", stem: "drums", a: 0, b: 44100, sr: 44100 } };
+  const rl = app.refreshMine(L);
+  await answer("/api/mine/postcard", bank(9, XY));            // X is cached: held; Y is fetched
+  const rr = app.refreshMine(R);
+  await answer("/api/mine/postcard", bank(10, {})); await rr;  // the right lets go of X
+  await answer("/mine/postcard/p02-r0009-yyyyyy.wav", null); await rl;
+  check("two decks: a filled pad never loses its buffer to the other deck's cleanup",
+        L.banks.mine[0] && app.cache["postcard/mine/p01-r0008-xxxxxx.wav"] && app.cache["postcard/mine/p02-r0009-yyyyyy.wav"]);
+  delete R.banks.mine; R.pack = null;
 
   // keys: Shift+5 picks the left deck's mine bank, Shift+6 the right's, plain 5 / 6 are still SYNC
   L.banks.mine = new Array(16).fill(undefined); L.banks.mine[0] = "mine/x.wav"; L.bank = "loops";

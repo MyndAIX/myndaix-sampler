@@ -18,17 +18,24 @@
     let k = 0;
     for (let t = bars[0] - barlen; t > -barlen; t -= barlen) out.unshift({ t: Math.max(0, t), bar: k-- });
     bars.forEach((t, i) => out.push({ t, bar: i + 1 }));
-    // the chopper ends bars_s at the song's end when the last bar is partial; past that, nothing
+    // the chopper ends bars_s at the song's end when the last bar is partial: that last entry is the
+    // end, not a bar start (end: true; not counted, nothing after it)
+    const last = out[out.length - 1];
+    if (last.t >= dur - 1e-3) { last.end = true; return out; }
     for (let i = bars.length, t = bars[bars.length - 1] + barlen; t < dur - 1e-6; i++, t += barlen) out.push({ t, bar: i + 1 });
     return out;
   }
 
-  // Beat times: 4 per bar, each a quarter of that bar. A partial last bar gets only the beats that fit.
+  // Beat times: 4 per bar, each a quarter of that bar. A partial bar (the one running into the song's
+  // end, or the open one after the last line) keeps the median bar's beat spacing and gets only the
+  // beats that fit, instead of four squeezed ones.
   function beats(lines, barlen, dur) {
     const out = [];
     for (let i = 0; i < lines.length; i++) {
+      if (lines[i].end) break;
       const t0 = lines[i].t, t1 = i + 1 < lines.length ? lines[i + 1].t : t0 + barlen;
-      const step = (i + 1 < lines.length ? t1 - t0 : barlen) / 4;
+      const partial = i + 1 >= lines.length || lines[i + 1].end;
+      const step = (partial ? barlen : t1 - t0) / 4;
       for (let q = 0; q < 4; q++) { const t = t0 + q * step; if (t <= dur + 1e-9 && (q === 0 || t < t1 - 1e-9)) out.push(t); }
     }
     if (!out.length || out[out.length - 1] < dur) out.push(dur);
@@ -51,10 +58,11 @@
   }
 
   // Which bar a time sits in, and the beat inside it (1-4), for labels like "bar 23.2"
-  function where(lines, t) {
+  function where(lines, t, barlen = 2) {
     let i = 0;
-    while (i + 1 < lines.length && lines[i + 1].t <= t) i++;
-    const t0 = lines[i].t, t1 = i + 1 < lines.length ? lines[i + 1].t : t0 + 1;
+    while (i + 1 < lines.length && lines[i + 1].t <= t && !lines[i + 1].end) i++;
+    // a partial bar counts its beats at the median spacing, like beats() does
+    const t0 = lines[i].t, t1 = i + 1 < lines.length && !lines[i + 1].end ? lines[i + 1].t : t0 + barlen;
     return { bar: lines[i].bar, beat: 1 + Math.min(3, Math.floor(4 * (t - t0) / Math.max(1e-9, t1 - t0))) };
   }
 

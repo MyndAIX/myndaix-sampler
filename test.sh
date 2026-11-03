@@ -296,6 +296,37 @@ with wave.open(str(lib / "songs" / "p2.wav"), "wb") as w:
 c, _ = save({"slug": "p2", "owner": "id:p2", "stem": "mix", "pad": 1, "t0": 0, "t1": 0.5})
 check("a symlinked mine/<slug> is refused, nothing written there", c == 400 and sorted(x.name for x in secret.iterdir()) == ["key.txt", "vocals.wav"])
 
+# a regions.json that is a symlink, or damaged, is never read as the bank and never saved on top of
+mf = lib / "mine" / "test-pack" / "regions.json"; keep = mf.read_bytes(); rev0 = json.loads(keep)["rev"]
+fake = secret / "bank.json"
+fake.write_text(json.dumps({"owner": "id:test", "rev": 99, "pads": {"1": {"file": "LEAKED.wav", "stem": "mix", "a": 0, "b": 1, "sr": 1}}}))
+mf.unlink(); mf.symlink_to(fake)
+c, b = req("/api/mine/test-pack"); m = json.loads(b)
+check("a symlinked regions.json is not shown as the bank", c == 200 and b"LEAKED" not in b and m["saveable"] is False and "plain file" in m["why"])
+c, r = save({**V, "pad": 2, "t0": 0, "t1": 1})
+check("... nor saved to (409), the file it points to untouched", c == 409 and json.loads(fake.read_text())["rev"] == 99)
+mf.unlink(); mf.write_text("{bad json")
+c, b = req("/api/mine/test-pack"); m = json.loads(b)
+check("a damaged regions.json: view only, says so", m["saveable"] is False and "damaged" in m["why"])
+c, r = save({**V, "pad": 2, "t0": 0, "t1": 1})
+check("... and a save refuses it (409) rather than start a new bank on top", c == 409 and mf.read_text() == "{bad json")
+mf.write_bytes(keep)
+check("... restored, the bank is back", json.loads(req("/api/mine/test-pack")[1])["rev"] == rev0)
+
+# HEAD replies carry headers only, JSON ones included (checked on the raw bytes: urllib hides a body)
+import socket
+def raw_head(path):
+    with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=3) as k:
+        k.sendall(f"HEAD {path} HTTP/1.1\r\nHost: 127.0.0.1:{sys.argv[1]}\r\nConnection: close\r\n\r\n".encode())
+        data = b""
+        while (chunk := k.recv(65536)):
+            data += chunk
+    head, _, body = data.partition(b"\r\n\r\n")
+    return int(head.split()[1]), body
+for path, want in (("/api/mine/test-pack", 200), ("/api/mine/nope", 404), ("/mine/test-pack/nope.wav", 404), ("/stems/test-pack/evil.wav", 404)):
+    code, body = raw_head(path)
+    check(f"HEAD {path}: {want}, no body bytes", code == want and body == b"")
+
 # vs.py run with a chopper that fails marks the request failed (no venv here -> flip.sh exits 1)
 c, b = req("/requests", "POST", json.dumps({"url": "https://www.youtube.com/watch?v=zzz"}).encode(), H)
 rid = str(json.loads(b)["request"]["id"])

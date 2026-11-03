@@ -136,22 +136,33 @@ def mine_dir(slug):
 
 
 def read_manifest(slug):
+    """(bank, None), (None, None) when there is no bank yet, or (None, why) when there is one but it
+    can't be trusted: a symlink (it would read a file outside the library) or damaged JSON. Commits are
+    atomic, so a damaged one was edited by hand: a save refuses it rather than start over on top."""
     d = mine_dir(slug)
     if d is None:
-        return None
+        return None, "bad mine folder"
+    f = d / "regions.json"
     try:
-        m = json.loads((d / "regions.json").read_text())
+        fd = os.open(f, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        return None, None
+    except OSError:                     # ELOOP: regions.json is a symlink
+        return None, "mine/<slug>/regions.json is not a plain file"
+    try:
+        with os.fdopen(fd) as fh:
+            m = json.loads(fh.read())
     except (OSError, ValueError):
-        return None
+        return None, "mine/<slug>/regions.json is damaged"
     ok = isinstance(m, dict) and isinstance(m.get("pads"), dict) and type(m.get("rev")) is int
-    return m if ok else None
+    return (m, None) if ok else (None, "mine/<slug>/regions.json is damaged")
 
 
 def live_manifest(slug):
     """The bank to show, or None. A missing owner never matches, and a bank made for another song
     under this slug is refused."""
     owner = owner_of(slug)
-    m = read_manifest(slug)
+    m, _ = read_manifest(slug)
     if owner is None or m is None or m.get("owner") != owner:
         return None
     return m
@@ -169,11 +180,13 @@ def stem_format(f):
 def mine_info(slug):
     owner = owner_of(slug)
     m = live_manifest(slug)
+    _, bad = read_manifest(slug)
     formats = {n: stem_format(f) for n in STEM_NAMES if (f := stem_file(slug, n))}
+    why = ("this pack has no songs/<slug>.source, so it can be viewed but not saved to" if owner is None
+           else f"{bad}: move it aside to start a new bank" if bad else None)
     return {"slug": slug, "owner": owner, "rev": m["rev"] if m else 0,
             "pads": m["pads"] if m else {}, "formats": formats,
-            "saveable": owner is not None,
-            "why": None if owner else "this pack has no songs/<slug>.source, so it can be viewed but not saved to"}
+            "saveable": why is None, "why": why}
 
 
 def cut_pcm16(src, t0, t1):
@@ -203,6 +216,15 @@ def cut_pcm16(src, t0, t1):
     if sys.byteorder == "big":
         x.byteswap()
     return x.tobytes(), ch, sr, a, b
+
+
+def mkdir_new(d):
+    """True if this call made the folder."""
+    try:
+        d.mkdir()
+        return True
+    except FileExistsError:
+        return False
 
 
 def fsync_dir(d):
@@ -284,14 +306,20 @@ def save_mine(obj):
             return 409, {"error": "this pack has no owner record, so it can't be saved to"}
         if obj.get("owner") != owner:
             return 409, {"error": "this pack changed (re-chopped as another song); reload", "stale": True}
-        MINE.mkdir(exist_ok=True)
+        # a new folder's own entry is in its parent: fsync the parent too, or a power cut can lose
+        # a save that was already acknowledged
+        if mkdir_new(MINE):
+            fsync_dir(HOME)
         d = mine_dir(slug)
         if d is None:
             return 400, {"error": "bad mine folder"}
-        d.mkdir(exist_ok=True)
+        if mkdir_new(d):
+            fsync_dir(MINE)
         if not inside(d, MINE):
             return 400, {"error": "bad mine folder"}
-        m = read_manifest(slug)
+        m, bad = read_manifest(slug)
+        if bad:
+            return 409, {"error": f"{bad}; move it aside to start a new bank"}
         if m is None:
             m = {"owner": owner, "rev": 0, "pads": {}, "prev": {}}
         elif m.get("owner") != owner:
@@ -306,6 +334,7 @@ def save_mine(obj):
             except (ValueError, wave.Error, EOFError) as e:
                 return 400, {"error": str(e)}
             entry = {"file": write_cut(d, pad, rev, pcm, ch, sr), "stem": stem, "a": a, "b": b, "sr": sr}
+            fsync_dir(d)                # the cut's name is on disk before any manifest names it
         pads = dict(m["pads"])
         prev = dict(m.get("prev") or {})
         if key in pads:
@@ -362,7 +391,8 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":      # HEAD gets GET's headers and no body, errors included
+            self.wfile.write(body)
 
     def send_file(self, f, ctype, head=False):
         try:
