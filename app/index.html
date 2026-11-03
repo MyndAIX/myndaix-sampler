@@ -212,22 +212,23 @@ function toggleLoop(d, f) {
 
 // A loop source that keeps sounding until `until` (a bar line), tracked so a stop, a pack load or a
 // speed change still reaches it.
+// A source that was due to stop at or before its start (switched on and off before its bar line)
+// never sounds, so it is cancelled outright.
 function retire(d, src, until) {
-  // not started yet: cancel it now. Kept, its start would stay at the old speed's time while a
-  // speed change moved its stop, and it would sound off the grid.
-  if (src.startAt > ctx.currentTime) { src.onended = null; src.stop(); return; }
+  if (src.startAt >= until) { src.onended = null; src.stop(); return; }
   src.until = until; src.stop(until);
   d.tails.add(src); src.onended = () => d.tails.delete(src);
 }
 
-function startLoop(d, f, at) {
+function loopSource(d, f, at) {
   const src = ctx.createBufferSource();
   src.buffer = buf(d, f); src.loop = true; src.playbackRate.value = rate(d); src.connect(d.volGain);
   // join in phase with the deck's loops already running (all 8 bars long)
   src.start(at, SM.loopPos(d.clock0, at, rate(d), src.buffer.duration));
-  src.startAt = at;
-  d.loops[f] = { src, at };
+  src.startAt = at; src.file = f;
+  return src;
 }
+function startLoop(d, f, at) { d.loops[f] = { src: loopSource(d, f, at), at }; }
 
 function stopLoops(d) {
   for (const f in d.loops) d.loops[f].src.stop();
@@ -325,7 +326,14 @@ function applyRate(d, semis, fine, now = ctx.currentTime) {
   // a coming time keeps its place in the music: a bar line 1 s away at the old speed moves to r0/r1 s away
   const warp = t => SM.reanchor(t, now, r0, r1);
   if (d.clock0 !== null) d.clock0 = warp(d.clock0);
-  for (const src of d.tails) {
+  for (const src of [...d.tails]) {
+    if (src.startAt > now) {
+      // still waiting to start (e.g. queued just before a sync restart): both ends were worked out
+      // at the old speed, so make it again with both moved
+      src.onended = null; src.stop(); d.tails.delete(src);
+      retire(d, loopSource(d, src.file, warp(src.startAt)), warp(src.until));
+      continue;
+    }
     src.playbackRate.setValueAtTime(r1, now);
     if (src.until > now) { src.until = warp(src.until); src.stop(src.until); }
   }

@@ -153,6 +153,27 @@ at(1); app.setPitch(L, -12);
 check("a loop cancelled before its bar line never sounds, even after a speed change",
       audio.srcs.filter(s => s.deck === "R").every(s => !s.sounding(2.5) && !s.sounding(3)));
 
+// review #3: a loop queued for the next bar, then SYNC restarts the deck a bar later: the queued
+// loop plays until the restart, and keeps its place through a speed change while it waits
+setup(16, 16);
+at(0); loop(L);
+at(0.3); loop(R);
+at(1); loop(R, FILES[1]);          // queued for R's bar line at 2.32
+at(2.2); app.syncTo(R);            // restart on L's line at 4.02
+check("a loop queued before a SYNC restart plays until the restart",
+      sounding(R, 3).length === 2 && sounding(R, 3).some(s => s.file === FILES[1]));
+setup(16, 16);
+at(0); loop(L);
+at(0.3); loop(R);
+at(1); loop(R, FILES[1]);
+at(2.2); app.syncTo(R);
+at(2.25); app.setPitch(L, -12);    // before the queued loop starts
+const q = audio.srcs.filter(s => s.deck === "R" && s.file === FILES[1] && s.startT < s.stopT && s.stopT < Infinity);
+const lead = sounding(L, 2.5)[0];
+check("... and through a slowdown before it starts: on L's beat, stops on the restart line",
+      q.length === 1 && close(q[0].pos(q[0].startT + 0.5) / 2 % 1, lead.pos(q[0].startT + 0.5) / 2 % 1)
+      && Math.abs(q[0].stopT - sounding(R, q[0].stopT + 0.01).find(s => s.file === FILES[1]).startT) < 1e-9);
+
 // 5. review P1: ×2/÷2 that leaves the grids between each other's bar lines
 setup(16, 32);             // L 2 s bars, R 4 s bars (half time under L)
 at(0); loop(L);
