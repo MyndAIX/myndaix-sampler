@@ -20,6 +20,12 @@ Playing along:
   vs.py xfade 50               crossfader 0-100 (0 = only left, 100 = only right)
   vs.py stop                   stop all loops on both decks
   vs.py say "text"             show a message on the sampler screen
+
+The player's own bank ("mine", the chop editor's; Shift+5 / Shift+6 on the decks):
+  vs.py mine SLUG              the bank: pads, stems, and whether it can be saved to
+  vs.py chop SLUG PAD STEM T0 T1   cut STEM (vocals drums bass other guitar piano mix) from T0 to T1
+                               seconds onto PAD (1-16). Vocals: a natural phrase, never stretched.
+  vs.py chop SLUG PAD clear    empty a pad (its old cut stays on disk)
 """
 import json
 import os
@@ -27,6 +33,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -47,6 +54,31 @@ def call(method, path, obj=None):
 def send(obj):
     print(call("POST", "/control", obj))
     return 0
+
+
+def mine(slug):
+    return call("GET", f"/api/mine/{urllib.request.quote(slug, safe='')}")
+
+
+def chop(slug, pad, rest):
+    # the owner comes from the server's own read of the pack, so a re-chop as another song in between
+    # gets a "stale" refusal instead of a cut from the wrong audio
+    body = {"slug": slug, "pad": pad, "owner": mine(slug).get("owner")}
+    if rest == ["clear"]:
+        body["clear"] = True
+    else:
+        body.update(stem=rest[0], t0=float(rest[1]), t1=float(rest[2]))
+    for attempt in range(2):
+        try:
+            print(json.dumps(call("POST", "/api/mine", body)))
+            return 0
+        except urllib.error.HTTPError as e:
+            reply = json.loads(e.read() or b"{}")
+            if reply.get("busy") and attempt == 0:
+                time.sleep(0.5)
+                continue
+            print(f"{e.code}: {reply.get('error', reply)}", file=sys.stderr)
+            return 1
 
 
 def waiting():
@@ -145,6 +177,12 @@ def main(argv):
         return send({"cmd": "sync", "deck": "off"})
     if cmd == "xfade" and len(rest) == 1 and re.fullmatch(r"\d{1,3}", rest[0]) and int(rest[0]) <= 100:
         return send({"cmd": "xfade", "value": int(rest[0])})
+    if cmd == "mine" and len(rest) == 1:
+        print(json.dumps(mine(rest[0]), indent=1))
+        return 0
+    if (cmd == "chop" and len(rest) >= 3 and rest[1].isdigit() and 1 <= int(rest[1]) <= 16
+            and (rest[2:] == ["clear"] or (len(rest) == 5 and all(re.fullmatch(r"\d+(\.\d+)?", x) for x in rest[3:])))):
+        return chop(rest[0], int(rest[1]), rest[2:])
     if cmd == "say" and len(rest) == 1:
         return send({"cmd": "say", "text": rest[0]})
     if cmd == "sync" and len(rest) == 1 and rest[0] in ("L", "R"):

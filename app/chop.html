@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chop Editor · MyndAIX-Sampler</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { --bg:#111214; --panel:#1b1d21; --pad:#2a2d33; --hi:#ff7a1a; --ai:#3a8fd9; --mine:#2fbf71;
+          --text:#e8e8ea; --dim:#8a8d94; --line:#33363d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.4 -apple-system, system-ui, sans-serif;
+         display:flex; justify-content:center; min-height:100vh; }
+  main { width:min(1120px, 100% - 32px); padding:16px 0; }
+  header { display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  h1 { font-size:16px; margin:0; letter-spacing:.04em; }
+  a { color:var(--dim); }
+  .screen { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 12px; margin:10px 0;
+            font-family:ui-monospace, Menlo, monospace; font-size:13px; color:var(--hi); min-height:36px; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; align-items:center; }
+  select, button { background:var(--pad); color:var(--text); border:1px solid var(--line); border-radius:6px;
+                   padding:5px 9px; cursor:pointer; font:inherit; font-size:12px; }
+  button.on { border-color:var(--hi); color:var(--hi); }
+  button:disabled { opacity:.3; cursor:default; }
+  .spacer { flex:1; }
+  .wrap { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px; }
+  canvas { display:block; width:100%; height:200px; background:#0c0d0f; border:1px solid var(--line); border-radius:6px;
+           cursor:crosshair; touch-action:none; }
+  #over { height:28px; margin-top:6px; cursor:pointer; }
+  .sel { display:flex; gap:8px; align-items:center; margin:10px 0 0; font-family:ui-monospace, Menlo, monospace; font-size:12px; color:var(--dim); flex-wrap:wrap; }
+  #chip { background:var(--hi); color:#111; border-radius:6px; padding:5px 10px; cursor:grab; font-weight:600; }
+  #chip[hidden] { display:none; }
+  .lower { display:grid; grid-template-columns:minmax(0, 360px) 1fr; gap:24px; margin-top:14px; }
+  @media (max-width: 760px) { .lower { grid-template-columns:1fr; } }
+  .grid { display:grid; grid-template-columns:repeat(4, 1fr); gap:7px; }
+  .pad { aspect-ratio:1; background:var(--pad); border-radius:8px; border:1px solid var(--line); cursor:pointer;
+         user-select:none; display:flex; flex-direction:column; justify-content:space-between; padding:6px;
+         font-size:11px; color:var(--dim); overflow:hidden; position:relative; }
+  .pad.empty { opacity:.5; }
+  .pad.full { border-color:var(--mine); color:var(--text); }
+  .pad.target { box-shadow:0 0 0 2px var(--hi); }
+  .pad.hit { background:var(--hi); color:#111; }
+  .pad .n { font-weight:600; }
+  .pad .x { position:absolute; top:3px; right:5px; color:var(--dim); font-size:13px; line-height:1; padding:2px; }
+  .help { color:var(--dim); font-size:12px; line-height:1.7; }
+  .help b { color:var(--text); }
+  .key { display:inline-block; width:10px; height:10px; border-radius:2px; vertical-align:-1px; margin-right:4px; }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>CHOP EDITOR</h1><a href="/" id="back">back to the decks</a></header>
+  <div class="screen" id="screen">loading…</div>
+  <div class="wrap">
+    <div class="row">
+      <select id="pack" aria-label="pack"></select>
+      <span id="stems" class="row" style="margin:0"></span>
+      <span class="spacer"></span>
+      <button id="zout" title="zoom out (scroll wheel)">−</button>
+      <button id="zin" title="zoom in (scroll wheel)">+</button>
+      <button id="zall">whole song</button>
+    </div>
+    <canvas id="wave"></canvas>
+    <canvas id="over" title="the whole song: click to jump"></canvas>
+    <div class="sel">
+      <span id="chip" draggable="true" hidden>drag me to a pad</span>
+      <span id="selinfo">drag across the wave to select</span>
+      <span class="spacer"></span>
+      <button id="play" disabled>▶ play (Space)</button>
+      <button id="loop" disabled>loop (L)</button>
+    </div>
+  </div>
+  <div class="lower">
+    <div>
+      <div class="row" style="justify-content:space-between"><b>mine</b><span class="help" style="margin:0">your bank: Shift+5 left deck · Shift+6 right deck</span></div>
+      <div class="grid" id="pads"></div>
+    </div>
+    <p class="help">
+      <b>Select:</b> drag on the wave. It snaps to the nearest beat; hold <b>Shift</b> for whole bars, <b>Alt</b> for no snap.
+      Beats are quarters of the detected bars, so on a drifting song they're close, not exact.<br>
+      <b>Hear it:</b> Space plays the selection, L loops it, Esc stops. Click a shaded region to select what the AI chopped.<br>
+      <b>Keep it:</b> drag the orange chip onto a pad, or Shift+click a pad. Click a pad to hear it, × to empty it.
+      A replaced pick is kept on disk, never deleted. Nothing is stretched.<br>
+      <span class="key" style="background:var(--ai)"></span>AI chops and loops
+      <span class="key" style="background:var(--mine); margin-left:10px"></span>your pads
+      <span class="key" style="background:var(--hi); margin-left:10px"></span>selection
+    </p>
+  </div>
+</main>
+<script src="chopmath.js"></script>
+<script>
+"use strict";
+const CM = window.ChopMath;
+const $ = id => document.getElementById(id);
+const say = t => { $("screen").textContent = t; };
+const ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "interactive" });
+const STEM_ORDER = ["vocals", "drums", "bass", "other", "guitar", "piano", "mix"];
+const STEM_LABEL = { other: "synth/keys", mix: "full mix" };
+// Pad keys match the left deck: pad 1 bottom-left
+const KEYS = ["z","x","c","v","a","s","d","f","q","w","e","r","1","2","3","4"];
+const E = { slug: null, meta: null, mine: null, stem: null, buf: null, dur: 0, lines: [], beats: [],
+            v0: 0, v1: 1, sel: null, src: null, playAt: 0, playFrom: 0, playLen: 0, looping: false,
+            padBufs: {}, gen: 0, ctx };
+window.CE = E;                      // test hook
+
+async function getJSON(u) { const r = await fetch(u, { cache: "no-store" }); if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.status); return r.json(); }
+
+async function openPack(slug) {
+  stop();
+  const gen = ++E.gen;
+  say(`loading ${slug}…`);
+  const [meta, mine] = await Promise.all([getJSON(`/packs/${encodeURIComponent(slug)}/analysis.json`), getJSON(`/api/mine/${encodeURIComponent(slug)}`)]);
+  if (gen !== E.gen) return;
+  Object.assign(E, { slug, meta, mine, buf: null, sel: null, padBufs: {} });
+  history.replaceState(null, "", `?pack=${encodeURIComponent(slug)}`);
+  $("back").href = `/?left=${encodeURIComponent(slug)}`;
+  renderStems(); renderPads(); loadPadBufs();
+  const first = STEM_ORDER.find(s => mine.formats[s]) || null;
+  if (first) await openStem(first);
+  else say("this pack has no stems on disk, so there is nothing to show");
+}
+
+async function openStem(stem) {
+  stop();
+  const gen = ++E.gen, slug = E.slug;
+  E.stem = stem; renderStems();
+  say(`loading the ${STEM_LABEL[stem] || stem} stem (whole song)…`);
+  const b = await ctx.decodeAudioData(await (await fetch(`/stems/${encodeURIComponent(slug)}/${stem}.wav`)).arrayBuffer());
+  if (gen !== E.gen) return;
+  E.buf = b; E.dur = b.duration;
+  const barlen = E.meta.barlen || 2;
+  E.lines = CM.barLines(E.meta.bars_s, barlen, E.dur);
+  E.beats = CM.beats(E.lines, barlen, E.dur);
+  E.v0 = 0; E.v1 = E.dur; E.sel = null; peakCache = null;
+  updateSel();
+  const fmt = E.mine.formats[stem];
+  say(`${E.slug} · ${STEM_LABEL[stem] || stem} · ${CM.clock(E.dur)} · ${E.lines.filter(l => l.bar > 0).length} bars` +
+      (fmt !== "pcm16" ? ` · view only: this stem is ${fmt}, so it can't be cut here` : "") +
+      (E.mine.saveable ? "" : ` · view only: ${E.mine.why}`));
+}
+
+function renderStems() {
+  const el = $("stems"); el.textContent = "";
+  for (const s of STEM_ORDER) {
+    if (!E.mine || !E.mine.formats[s]) continue;
+    const b = document.createElement("button");
+    b.textContent = STEM_LABEL[s] || s; b.className = s === E.stem ? "on" : "";
+    b.onclick = () => openStem(s);
+    el.append(b);
+  }
+}
+
+// ---- drawing ----
+let peakCache = null;           // { n, v0, v1, p } for the main view
+function peaksFor(n, v0, v1) {
+  if (peakCache && peakCache.n === n && peakCache.v0 === v0 && peakCache.v1 === v1) return peakCache.p;
+  const b = E.buf, sr = b.sampleRate, chs = [];
+  for (let c = 0; c < b.numberOfChannels; c++) chs.push(b.getChannelData(c));
+  const a0 = Math.floor(v0 * sr), a1 = Math.min(b.length, Math.ceil(v1 * sr)), p = new Float32Array(n * 2);
+  const per = (a1 - a0) / n, stride = Math.max(1, Math.floor(per / 64));   // sample at most ~64 points a column
+  for (let x = 0; x < n; x++) {
+    let lo = 0, hi = 0;
+    for (let i = Math.floor(a0 + x * per), e = Math.min(a1, Math.floor(a0 + (x + 1) * per)); i < e; i += stride) {
+      let v = 0; for (const ch of chs) v += ch[i];
+      v /= chs.length; if (v < lo) lo = v; if (v > hi) hi = v;
+    }
+    p[2 * x] = lo; p[2 * x + 1] = hi;
+  }
+  peakCache = { n, v0, v1, p };
+  return p;
+}
+let overPeaks = null;
+const css = getComputedStyle(document.documentElement);
+const C = k => css.getPropertyValue(k).trim();
+
+function fit(cv) {
+  const dpr = window.devicePixelRatio || 1, W = Math.round(cv.clientWidth * dpr), H = Math.round(cv.clientHeight * dpr);
+  if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+  return { g: cv.getContext("2d"), W, H, dpr };
+}
+
+// Regions to shade on this stem: the AI's chops and loops, and the player's own pads
+function regions() {
+  const out = [], m = E.meta;
+  for (const [f, r] of Object.entries(m.regions || {}))
+    if (r.stem === E.stem) out.push({ t0: r.a / r.sr, t1: r.b / r.sr, label: f.split("/")[1] + " " + f.split("/").pop().replace(/\D+/g, "").slice(-2), kind: "ai" });
+  for (const [s, l] of Object.entries(m.loops || {}))
+    if (s === E.stem) out.push({ t0: l.start, t1: l.start + l.seconds, label: "loop", kind: "ai" });
+  for (const [i, e] of CM.slots(E.mine && E.mine.pads).entries())
+    if (e && e.stem === E.stem) out.push({ t0: e.a / e.sr, t1: e.b / e.sr, label: `pad ${i + 1}`, kind: "mine" });
+  return out;
+}
+
+function draw() {
+  requestAnimationFrame(draw);
+  const cv = $("wave");
+  const { g, W, H, dpr } = fit(cv);
+  g.clearRect(0, 0, W, H);
+  if (!E.buf) return;
+  const { v0, v1 } = E, X = t => (t - v0) / (v1 - v0) * W;
+  const n = Math.max(1, Math.floor(W / dpr)), p = peaksFor(n, v0, v1);
+  let norm = 1e-4; for (let i = 0; i < p.length; i++) norm = Math.max(norm, Math.abs(p[i]));
+  const top = 16 * dpr, mid = top + (H - top) / 2, amp = ((H - top) / 2 - 4 * dpr) / norm;
+  // regions under the wave
+  g.font = `${10 * dpr}px ui-monospace, Menlo, monospace`;
+  const regs = regions();
+  for (const r of regs) {
+    if (r.t1 < v0 || r.t0 > v1) continue;
+    g.fillStyle = r.kind === "mine" ? "rgba(47,191,113,.16)" : "rgba(58,143,217,.14)";
+    g.fillRect(X(r.t0), top, Math.max(dpr, X(r.t1) - X(r.t0)), H - top);
+    g.fillStyle = r.kind === "mine" ? C("--mine") : C("--ai");
+    g.fillRect(X(r.t0), r.kind === "mine" ? H - 3 * dpr : top, Math.max(dpr, X(r.t1) - X(r.t0)), 3 * dpr);
+  }
+  if (E.sel) { g.fillStyle = "rgba(255,122,26,.22)"; g.fillRect(X(E.sel.t0), 0, X(E.sel.t1) - X(E.sel.t0), H); }
+  // wave
+  g.fillStyle = "#6b6f78";
+  for (let x = 0; x < n; x++) {
+    const y0 = mid - p[2 * x + 1] * amp, y1 = mid - p[2 * x] * amp;
+    g.fillRect(x * dpr, y0, dpr, Math.max(dpr, y1 - y0));
+  }
+  // bar lines + numbers; beats when zoomed in enough
+  const pxPerBar = W / ((v1 - v0) / (E.meta.barlen || 2));
+  if (pxPerBar > 80 * dpr) {
+    g.fillStyle = "rgba(255,255,255,.06)";
+    for (const t of E.beats) if (t >= v0 && t <= v1) g.fillRect(X(t), top, 1, H - top);
+  }
+  const every = pxPerBar > 26 * dpr ? 1 : pxPerBar > 13 * dpr ? 2 : pxPerBar > 6 * dpr ? 4 : 8;
+  for (const l of E.lines) {
+    if (l.t < v0 || l.t > v1) continue;
+    g.fillStyle = l.bar === 1 ? "rgba(255,255,255,.35)" : "rgba(255,255,255,.16)";
+    g.fillRect(X(l.t), top, 1, H - top);
+    if (l.bar > 0 && (l.bar - 1) % every === 0) { g.fillStyle = C("--dim"); g.fillText(String(l.bar), X(l.t) + 2 * dpr, 11 * dpr); }
+  }
+  // region labels on top
+  for (const r of regs) {
+    if (r.t1 < v0 || r.t0 > v1 || X(r.t1) - X(r.t0) < 30 * dpr) continue;
+    g.fillStyle = r.kind === "mine" ? C("--mine") : C("--ai");
+    g.fillText(r.label, X(r.t0) + 2 * dpr, r.kind === "mine" ? H - 6 * dpr : top + 13 * dpr);
+  }
+  // playhead
+  if (E.src) {
+    let e = ctx.currentTime - E.playAt;
+    if (E.looping) e = ((e % E.playLen) + E.playLen) % E.playLen;
+    if (e >= 0 && e <= E.playLen) { g.fillStyle = C("--text"); g.fillRect(X(E.playFrom + e), 0, Math.max(1, Math.round(dpr)), H); }
+  }
+  drawOverview();
+}
+
+function drawOverview() {
+  const cv = $("over"), { g, W, H, dpr } = fit(cv);
+  g.clearRect(0, 0, W, H);
+  const n = Math.max(1, Math.floor(W / dpr));
+  if (!overPeaks || overPeaks.n !== n || overPeaks.b !== E.buf) {
+    const save = peakCache; overPeaks = { n, b: E.buf, p: peaksFor(n, 0, E.dur) }; peakCache = save;
+  }
+  const p = overPeaks.p; let norm = 1e-4; for (let i = 0; i < p.length; i++) norm = Math.max(norm, Math.abs(p[i]));
+  g.fillStyle = "#4a4d55";
+  for (let x = 0; x < n; x++) { const y0 = H / 2 - p[2 * x + 1] * (H / 2) / norm, y1 = H / 2 - p[2 * x] * (H / 2) / norm; g.fillRect(x * dpr, y0, dpr, Math.max(dpr, y1 - y0)); }
+  for (const [, e] of CM.slots(E.mine && E.mine.pads).entries()) if (e && e.stem === E.stem) { g.fillStyle = C("--mine"); g.fillRect(e.a / e.sr / E.dur * W, H - 3 * dpr, Math.max(dpr, (e.b - e.a) / e.sr / E.dur * W), 3 * dpr); }
+  if (E.sel) { g.fillStyle = C("--hi"); g.fillRect(E.sel.t0 / E.dur * W, 0, Math.max(dpr, (E.sel.t1 - E.sel.t0) / E.dur * W), H); }
+  g.strokeStyle = C("--text"); g.lineWidth = dpr;
+  g.strokeRect(E.v0 / E.dur * W + 0.5, 0.5, (E.v1 - E.v0) / E.dur * W - 1, H - 1);
+}
+requestAnimationFrame(draw);
+
+// ---- zoom + scroll ----
+function setView(v0, v1) {
+  const span = Math.max(0.25, Math.min(E.dur, v1 - v0));
+  v0 = Math.max(0, Math.min(E.dur - span, v0));
+  E.v0 = v0; E.v1 = v0 + span; peakCache = null;
+}
+function zoom(f, at = (E.v0 + E.v1) / 2) { setView(at - (at - E.v0) * f, at + (E.v1 - at) * f); }
+$("zin").onclick = () => zoom(0.5, E.sel ? (E.sel.t0 + E.sel.t1) / 2 : undefined);
+$("zout").onclick = () => zoom(2);
+$("zall").onclick = () => setView(0, E.dur);
+$("wave").addEventListener("wheel", e => {
+  if (!E.buf) return;
+  e.preventDefault();
+  const r = e.currentTarget.getBoundingClientRect(), at = E.v0 + (e.clientX - r.left) / r.width * (E.v1 - E.v0);
+  if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) setView(E.v0 + e.deltaX / r.width * (E.v1 - E.v0), E.v1 + e.deltaX / r.width * (E.v1 - E.v0));
+  else zoom(Math.pow(1.0015, e.deltaY), at);
+}, { passive: false });
+$("over").onpointerdown = e => {
+  if (!E.buf) return;
+  const r = e.currentTarget.getBoundingClientRect(), at = (e.clientX - r.left) / r.width * E.dur, span = E.v1 - E.v0;
+  setView(at - span / 2, at + span / 2);
+};
+
+// ---- select ----
+const tAt = e => { const r = $("wave").getBoundingClientRect(); return E.v0 + (e.clientX - r.left) / r.width * (E.v1 - E.v0); };
+const mode = e => e.altKey ? "free" : e.shiftKey ? "bar" : "beat";
+let drag = null;
+$("wave").onpointerdown = e => {
+  if (!E.buf) return;
+  $("wave").setPointerCapture(e.pointerId);
+  drag = { x: e.clientX, t: tAt(e) };
+};
+$("wave").onpointermove = e => {
+  if (!drag) return;
+  if (Math.abs(e.clientX - drag.x) < 4) return;
+  const a = CM.snap(drag.t, mode(e), E.lines, E.beats, E.dur), b = CM.snap(tAt(e), mode(e), E.lines, E.beats, E.dur);
+  setSel(Math.min(a, b), Math.max(a, b));
+};
+$("wave").onpointerup = e => {
+  if (!drag) return;
+  const moved = Math.abs(e.clientX - drag.x) >= 4;
+  drag = null;
+  if (moved) { if (E.sel) play(false); return; }
+  // a click (no drag): select the region under it, the smallest first (a chop inside a loop)
+  const t = tAt(e), hit = regions().filter(r => r.t0 <= t && t <= r.t1).sort((x, y) => (x.t1 - x.t0) - (y.t1 - y.t0))[0];
+  if (hit) { setSel(hit.t0, hit.t1); play(false); } else { setSel(null); stop(); }
+};
+function setSel(t0, t1) {
+  E.sel = t0 === null || !(t1 - t0 >= 0.01) ? null : { t0, t1 };
+  updateSel();
+}
+function updateSel() {
+  const s = E.sel, ok = !!s;
+  $("play").disabled = $("loop").disabled = !ok;
+  const canSave = ok && E.mine && E.mine.saveable && E.mine.formats[E.stem] === "pcm16";
+  $("chip").hidden = !canSave;
+  if (!ok) { $("selinfo").textContent = "drag across the wave to select"; return; }
+  const a = CM.where(E.lines, s.t0), len = s.t1 - s.t0;
+  const bars = len / (E.meta.barlen || 2);
+  $("selinfo").textContent = `${CM.clock(s.t0)} → ${CM.clock(s.t1)} · ${len.toFixed(2)} s · from bar ${a.bar}.${a.beat}` +
+    ` · ≈${bars < 1 ? Math.round(bars * 4) + " beats" : bars.toFixed(bars % 1 < 0.05 || bars % 1 > 0.95 ? 0 : 1) + " bars"}` +
+    (len > 32 ? " · too long for a pad (32 s max)" : "");
+}
+
+// ---- audition ----
+function stop() {
+  if (E.src) { E.src.onended = null; try { E.src.stop(); } catch (e) {} E.src = null; }
+  E.looping = false; $("loop").className = "";
+}
+function play(loop) {
+  if (!E.sel || !E.buf) return;
+  ctx.resume();
+  stop();
+  const s = ctx.createBufferSource();
+  s.buffer = E.buf; s.connect(ctx.destination);
+  const len = E.sel.t1 - E.sel.t0;
+  if (loop) { s.loop = true; s.loopStart = E.sel.t0; s.loopEnd = E.sel.t1; s.start(0, E.sel.t0); }
+  else s.start(0, E.sel.t0, len);
+  Object.assign(E, { src: s, playAt: ctx.currentTime, playFrom: E.sel.t0, playLen: len, looping: loop });
+  $("loop").className = loop ? "on" : "";
+  s.onended = () => { if (E.src === s) E.src = null; };
+}
+$("play").onclick = () => play(false);
+$("loop").onclick = () => E.looping ? stop() : play(true);
+
+// ---- pads: the player's bank ----
+function renderPads() {
+  const el = $("pads"); el.textContent = "";
+  const sl = CM.slots(E.mine && E.mine.pads);
+  for (const r of [3, 2, 1, 0]) for (let c = 0; c < 4; c++) {
+    const i = r * 4 + c, e = sl[i];
+    const p = document.createElement("div");
+    p.className = "pad " + (e ? "full" : "empty"); p.dataset.pad = i + 1;
+    p.innerHTML = `<span class="n"></span><span class="nm"></span><span class="k"></span>`;
+    p.querySelector(".n").textContent = String(i + 1);
+    p.querySelector(".nm").textContent = e ? `${STEM_LABEL[e.stem] || e.stem} ${CM.clock(e.a / e.sr)}` : "";
+    p.querySelector(".k").textContent = KEYS[i].toUpperCase();
+    if (e) {
+      const x = document.createElement("span"); x.className = "x"; x.textContent = "×"; x.title = "empty this pad (the cut stays on disk)";
+      x.onpointerdown = ev => { ev.stopPropagation(); save(i + 1, true); };
+      p.append(x);
+    }
+    p.onpointerdown = ev => { if (ev.shiftKey) save(i + 1); else hitPad(i); };
+    p.ondragover = ev => { ev.preventDefault(); p.classList.add("target"); };
+    p.ondragleave = () => p.classList.remove("target");
+    p.ondrop = ev => { ev.preventDefault(); p.classList.remove("target"); save(i + 1); };
+    el.append(p);
+  }
+}
+$("chip").ondragstart = ev => { ev.dataTransfer.setData("text/plain", "chop"); ev.dataTransfer.effectAllowed = "copy"; };
+
+async function loadPadBufs() {
+  const slug = E.slug;
+  for (const e of CM.slots(E.mine.pads)) {
+    if (!e || E.padBufs[e.file]) continue;
+    try {
+      const b = await ctx.decodeAudioData(await (await fetch(`/mine/${encodeURIComponent(slug)}/${encodeURIComponent(e.file)}`)).arrayBuffer());
+      if (E.slug === slug) E.padBufs[e.file] = b;
+    } catch (err) { /* a pad that won't load just stays silent */ }
+  }
+}
+function hitPad(i) {
+  const e = CM.slots(E.mine && E.mine.pads)[i], b = e && E.padBufs[e.file];
+  const el = $("pads").querySelector(`[data-pad="${i + 1}"]`);
+  if (el) { el.classList.add("hit"); setTimeout(() => el.classList.remove("hit"), 110); }
+  if (!b) return;
+  ctx.resume();
+  const s = ctx.createBufferSource(); s.buffer = b; s.connect(ctx.destination); s.start();
+}
+
+async function save(pad, clear = false) {
+  if (!E.mine.saveable) return say(`can't save: ${E.mine.why}`);
+  if (!clear && !E.sel) return say("select something on the wave first");
+  if (!clear && E.mine.formats[E.stem] !== "pcm16") return say(`can't save from this stem: it is ${E.mine.formats[E.stem]}`);
+  const body = clear ? { slug: E.slug, owner: E.mine.owner, pad, clear: true }
+                     : { slug: E.slug, owner: E.mine.owner, pad, stem: E.stem, t0: +E.sel.t0.toFixed(5), t1: +E.sel.t1.toFixed(5) };
+  for (let tries = 0; tries < 2; tries++) {
+    const r = await fetch("/api/mine", { method: "POST", headers: { "Content-Type": "application/json", "X-VS": "1" }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) {
+      say(clear ? `pad ${pad} emptied (the cut is kept on disk)` : `pad ${pad} ← ${STEM_LABEL[E.stem] || E.stem} ${CM.clock(E.sel.t0)}, ${(E.sel.t1 - E.sel.t0).toFixed(2)} s · on the decks it's bank mine (Shift+5 / Shift+6)`);
+      E.mine = await getJSON(`/api/mine/${encodeURIComponent(E.slug)}`);
+      renderPads(); await loadPadBufs();
+      return;
+    }
+    if (j.busy && tries === 0) { await new Promise(res => setTimeout(res, 300)); continue; }
+    return say(j.stale ? "this pack changed (it was re-chopped as another song): reload the page" : `not saved: ${j.error || r.status}`);
+  }
+}
+
+// ---- keys ----
+document.addEventListener("keydown", e => {
+  if (e.metaKey || e.ctrlKey || ["SELECT", "INPUT", "TEXTAREA"].includes(e.target.tagName)) return;
+  if (e.key === " ") { e.preventDefault(); if (!e.repeat) (E.src && !E.looping ? stop() : play(false)); return; }
+  if (e.repeat) return;
+  const k = e.key.toLowerCase();
+  if (k === "l") return E.looping ? stop() : play(true);
+  if (k === "escape") return stop();
+  if (k === "=" || k === "+") return zoom(0.5);
+  if (k === "-") return zoom(2);
+  const i = KEYS.indexOf(k);
+  if (i >= 0 && !e.altKey) { e.preventDefault(); hitPad(i); }
+});
+window.addEventListener("focus", async () => {
+  // another tab (or the AI, through vs.py) may have changed the bank
+  if (!E.slug) return;
+  try { E.mine = await getJSON(`/api/mine/${encodeURIComponent(E.slug)}`); renderPads(); loadPadBufs(); updateSel(); } catch (e) {}
+});
+
+(async () => {
+  try {
+    const packs = (await getJSON("/api/packs")).packs;
+    const sel = $("pack");
+    for (const p of packs) { const o = document.createElement("option"); o.value = o.textContent = p; sel.append(o); }
+    sel.onchange = () => { openPack(sel.value); sel.blur(); };
+    if (!packs.length) return say("no packs yet: chop a song first");
+    const want = new URLSearchParams(location.search).get("pack");
+    sel.value = packs.includes(want) ? want : packs[0];
+    await openPack(sel.value);
+  } catch (e) { say(`couldn't load: ${e.message}`); }
+})();
+</script>
+</body>
+</html>

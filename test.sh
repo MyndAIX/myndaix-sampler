@@ -30,6 +30,20 @@ with wave.open(str(pack / "chops" / "synth16" / "synth 01.wav"), "wb") as w:
 # a pack moved aside by a --force re-chop: on disk, never in the deck menu
 old = pack.parent / "test-pack.prev-20260101-000000"
 old.mkdir(); (old / "analysis.json").write_text((pack / "analysis.json").read_text())
+# chop editor: the song that owns the pack, its stems (vocals 16-bit, drums float) and its mix
+lib = Path(sys.argv[1])
+(lib / "songs").mkdir(); (lib / "songs" / "test-pack.source").write_text("id:test\n")
+st = lib / "stems" / "htdemucs_6s" / "test-pack"; st.mkdir(parents=True)
+def pcm16(path, secs, sr=44100, ch=2, v=12000):
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(ch); w.setsampwidth(2); w.setframerate(sr)
+        w.writeframes(struct.pack(f"<{secs * sr * ch}h", *([v] * (secs * sr * ch))))
+pcm16(st / "vocals.wav", 3)
+pcm16(lib / "songs" / "test-pack.wav", 3, sr=48000)
+data = struct.pack("<4f", 0.5, 0.5, 0.5, 0.5)       # a 32-bit float WAV (format 3): demucs's float output
+fmt = struct.pack("<HHIIHH", 3, 2, 44100, 44100 * 8, 8, 32)
+(st / "drums.wav").write_bytes(b"RIFF" + struct.pack("<I", 4 + 8 + len(fmt) + 8 + len(data)) + b"WAVE"
+                               + b"fmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(data)) + data)
 PY
 
 SAMPLER_HOME="$LIB" python3 -I "$HERE/serve.py" "$PORT" > /dev/null 2>&1 &
@@ -149,6 +163,138 @@ threads = [threading.Thread(target=req, args=("/upload?name=Same.wav", "POST", b
 [t.start() for t in threads]; [t.join() for t in threads]
 got = sorted(f.read_bytes() for f in (lib / "inbox").glob("same*.wav"))
 check("8 concurrent same-name uploads -> 8 intact files", got == sorted(bodies))
+
+# ---- chop editor: the player's own bank (mine/<slug>/), cut from whole stems ----
+import struct, threading, time, wave
+c, b = req("/api/mine/test-pack"); info = json.loads(b)
+check("/api/mine: owner, empty bank, which stems can be cut",
+      c == 200 and info["owner"] == "id:test" and info["pads"] == {} and info["rev"] == 0 and info["saveable"]
+      and info["formats"]["vocals"] == "pcm16" and info["formats"]["mix"] == "pcm16" and info["formats"]["drums"] != "pcm16")
+for path in ("/api/mine/nope", "/api/mine/..%2Fetc", "/api/mine/test-pack/x", "/stems/test-pack/evil.wav",
+             "/stems/%2e%2e/vocals.wav", "/stems/test-pack/../../songs/test-pack.wav", "/mine/test-pack/regions.json",
+             "/mine/", "/mine/%2e%2e/%2e%2e/secret/key.txt", "/mine/test-pack/..%2Fregions.json"):
+    c, b = req(path); check(f"chop editor route refused: {path}", c == 404 and b"SECRET" not in b)
+c, b = req("/stems/test-pack/vocals.wav"); check("a whole stem is served", c == 200 and b[:4] == b"RIFF")
+c, b = req("/stems/test-pack/mix.wav"); check("... and the mix, as stem 'mix'", c == 200 and b[:4] == b"RIFF")
+c, b = req("/stems/test-pack/vocals.wav", "HEAD"); check("HEAD on a stem: headers, no body", c == 200 and b == b"")
+# a pack whose stems folder is a symlink out of the library
+(lib / "packs" / "p2").mkdir(); (lib / "packs" / "p2" / "analysis.json").write_text("{}")
+(secret / "vocals.wav").write_text("SECRET")
+(lib / "stems" / "htdemucs_6s" / "p2").symlink_to(secret)
+c, b = req("/stems/p2/vocals.wav"); check("a symlinked stems folder is not served", c == 404 and b"SECRET" not in b)
+
+def save(body, headers=H):
+    c, b = req("/api/mine", "POST", json.dumps(body).encode(), headers)
+    return c, json.loads(b or b"{}")
+V = {"slug": "test-pack", "owner": "id:test", "stem": "vocals"}
+c, _ = save({**V, "pad": 5, "t0": 0.5, "t1": 1.5}, {"Content-Type": "application/json"}); check("save without X-VS refused (403)", c == 403)
+c, _ = save({**V, "pad": 5, "t0": 0.5, "t1": 1.5}, {**H, "Origin": "https://attacker.example"}); check("save from a foreign Origin refused (403)", c == 403)
+for name, body, want in (("pad 0", {**V, "pad": 0, "t0": 0, "t1": 1}, 400), ("pad 17", {**V, "pad": 17, "t0": 0, "t1": 1}, 400),
+                         ("pad as text", {**V, "pad": "5", "t0": 0, "t1": 1}, 400), ("pad true", {**V, "pad": True, "t0": 0, "t1": 1}, 400),
+                         ("unknown stem", {**V, "stem": "../x", "pad": 1, "t0": 0, "t1": 1}, 400),
+                         ("t1 before t0", {**V, "pad": 1, "t0": 1, "t1": 0.5}, 400), ("negative t0", {**V, "pad": 1, "t0": -1, "t1": 1}, 400),
+                         ("too short (10 ms)", {**V, "pad": 1, "t0": 0, "t1": 0.01}, 400), ("too long (40 s)", {**V, "pad": 1, "t0": 0, "t1": 40}, 400),
+                         ("past the stem's end", {**V, "pad": 1, "t0": 2.5, "t1": 3.5}, 400),
+                         ("t0 as text", {**V, "pad": 1, "t0": "0", "t1": 1}, 400),
+                         ("unknown pack", {**V, "slug": "nope", "pad": 1, "t0": 0, "t1": 1}, 404),
+                         ("bad slug", {**V, "slug": "../packs", "pad": 1, "t0": 0, "t1": 1}, 404),
+                         ("a stem this pack lacks", {**V, "stem": "piano", "pad": 1, "t0": 0, "t1": 1}, 404),
+                         ("no owner sent", {"slug": "test-pack", "stem": "vocals", "pad": 1, "t0": 0, "t1": 1}, 409),
+                         ("another song's owner", {**V, "owner": "id:other", "pad": 1, "t0": 0, "t1": 1}, 409)):
+    c, r = save(body); check(f"save refused: {name} ({want})", c == want)
+c, _ = req("/api/mine", "POST", b'{"slug":"test-pack","owner":"id:test","stem":"vocals","pad":1,"t0":1e999,"t1":2}', H)
+check("save refused: an infinite time (400)", c == 400)
+c, r = save({**V, "stem": "drums", "pad": 1, "t0": 0, "t1": 0.06})
+check("a float stem can't be saved (400, says why)", c == 400 and "16-bit" in r.get("error", ""))
+check("nothing refused left a file or a bank behind", not any((lib / "mine" / "test-pack").glob("*")) if (lib / "mine" / "test-pack").exists() else True)
+
+c, r = save({**V, "pad": 5, "t0": 0.5, "t1": 1.5})
+check("save vocals 0.5-1.5 s on pad 5 -> rev 1", c == 200 and r["rev"] == 1 and r["entry"]["a"] == 22050 and r["entry"]["b"] == 66150)
+cut = lib / "mine" / "test-pack" / r["entry"]["file"]
+with wave.open(str(cut)) as w:
+    n, ch, sr = w.getnframes(), w.getnchannels(), w.getframerate()
+    x = struct.unpack(f"<{n * ch}h", w.readframes(n))
+check("the cut is exactly b - a frames, never stretched", n == 44100 and ch == 2 and sr == 44100)
+check("... both ends faded to exactly 0, the middle untouched", x[:2] == (0, 0) and x[-2:] == (0, 0) and x[n] == 12000)
+c, b = req("/mine/test-pack/" + r["entry"]["file"]); check("the cut is served", c == 200 and b[:4] == b"RIFF")
+c, b = req("/mine/test-pack/" + r["entry"]["file"], "HEAD"); check("HEAD on a cut: no body", c == 200 and b == b"")
+c, b = req("/control?after=0")
+check("the save told the decks (a 'mine' hint on the queue)", any(x.get("cmd") == "mine" and x.get("pack") == "test-pack" for x in json.loads(b)["cmds"]))
+first = r["entry"]
+
+out = vs("chop", "test-pack", "6", "mix", "0", "1")
+check("vs.py chop cuts the mix onto pad 6", out.returncode == 0 and '"rev": 2' in out.stdout)
+out = vs("mine", "test-pack"); m = json.loads(out.stdout)
+check("vs.py mine shows both pads", out.returncode == 0 and set(m["pads"]) == {"5", "6"} and m["pads"]["6"]["sr"] == 48000)
+for a in (["chop", "test-pack", "17", "vocals", "0", "1"], ["chop", "test-pack", "1", "vocals", "x", "1"], ["chop", "test-pack", "1"],
+          ["chop", "test-pack", "1", "vocals", "0"], ["mine"]):
+    check(f"vs.py rejects {' '.join(a)}", vs(*a).returncode == 2)
+check("vs.py chop: a refused save exits 1", vs("chop", "test-pack", "1", "piano", "0", "1").returncode == 1)
+
+# a chop running on this slug holds songs/.<slug>.lock: a save gets 409 busy, never waits or writes
+HOLD = ("import fcntl, os, sys; fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT); "
+        "fcntl.flock(fd, fcntl.LOCK_EX); print('held', flush=True); sys.stdin.read()")
+h = subprocess.Popen([sys.executable, "-I", "-c", HOLD, str(lib / "songs" / ".test-pack.lock")],
+                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+h.stdout.readline()
+c, r = save({**V, "pad": 7, "t0": 0, "t1": 1})
+check("save while the chopper holds the slug -> 409 busy", c == 409 and r.get("busy") is True)
+check("vs.py chop retries once, then gives up (exit 1)", vs("chop", "test-pack", "7", "vocals", "0", "1").returncode == 1)
+h.stdin.close(); h.wait()
+check("... and nothing changed", json.loads(req("/api/mine/test-pack")[1])["rev"] == 2)
+
+# a crash mid-save leaves a tmp manifest and an orphan cut: the bank is the last commit, the orphan stays
+d = lib / "mine" / "test-pack"
+(d / "regions.json.tmp").write_text("{half")
+orphan = d / "p07-r0003-000000.wav"; orphan.write_bytes(b"RIFF-orphan")
+c, b = req("/api/mine/test-pack"); m = json.loads(b)
+check("after a crash: the bank is the last commit (rev 2, pads 5 and 6)", m["rev"] == 2 and set(m["pads"]) == {"5", "6"})
+c, _ = req("/mine/test-pack/p07-r0003-000000.wav"); check("... an orphan cut is not served", c == 404)
+c, r = save({**V, "pad": 7, "t0": 0, "t1": 1})
+check("... the retry lands as rev 3 under its own name, the orphan kept",
+      c == 200 and r["rev"] == 3 and r["entry"]["file"] != orphan.name and orphan.read_bytes() == b"RIFF-orphan")
+
+# clear: the pad empties, its cut stays on disk (no deletes) and is remembered as prev
+c, r = save({"slug": "test-pack", "owner": "id:test", "pad": 5, "clear": True})
+man = json.loads((d / "regions.json").read_text())
+check("clear pad 5 -> rev 4, pad gone, cut kept on disk, remembered in prev",
+      c == 200 and r["rev"] == 4 and "5" not in man["pads"] and (d / first["file"]).exists() and man["prev"]["5"] == first)
+c, _ = req("/mine/test-pack/" + first["file"]); check("... a cleared cut is no longer served", c == 404)
+
+# 6 saves at once: each either lands or gets 409 busy; retried, all 6 land, rev +6, none lost
+codes = []
+def racer(pad):
+    for _ in range(50):
+        c, _ = save({**V, "pad": pad, "t0": 0, "t1": 0.5})
+        codes.append(c)
+        if c != 409: return
+        time.sleep(0.02)
+threads = [threading.Thread(target=racer, args=(p,)) for p in range(9, 15)]
+[t.start() for t in threads]; [t.join() for t in threads]
+m = json.loads(req("/api/mine/test-pack")[1])
+check(f"6 overlapping saves: only 200 or 409 ({codes.count(409)} busy), all 6 land, rev 4 -> 10",
+      set(codes) <= {200, 409} and codes.count(200) == 6 and m["rev"] == 10 and {str(p) for p in range(9, 15)} <= set(m["pads"]))
+
+# the pack re-chopped as another song (by hand here; flippack moves mine/ aside first): the old bank
+# names song A, so it is neither shown nor saved to under song B
+(lib / "songs" / "test-pack.source").write_text("id:new\n")
+m = json.loads(req("/api/mine/test-pack")[1])
+check("another song now owns the slug: the old bank is not shown", m["owner"] == "id:new" and m["pads"] == {})
+c, _ = req("/mine/test-pack/" + man["pads"]["6"]["file"]); check("... nor its cuts served", c == 404)
+c, r = save({**V, "owner": "id:new", "pad": 1, "t0": 0, "t1": 1}); check("... nor saved to (409 stale)", c == 409 and r.get("stale"))
+(lib / "songs" / "test-pack.source").write_text("id:test\n")
+
+# a pack with no owner record: viewable, not saveable
+(lib / "packs" / "noown").mkdir(); (lib / "packs" / "noown" / "analysis.json").write_text("{}")
+m = json.loads(req("/api/mine/noown")[1])
+check("no songs/<slug>.source: view only, says why", m["saveable"] is False and m["why"])
+# a mine/<slug> symlinked out of the library is never written through
+(lib / "songs" / "p2.source").write_text("id:p2\n")
+with wave.open(str(lib / "songs" / "p2.wav"), "wb") as w:
+    w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000); w.writeframes(b"\x10\x00" * 8000)
+(lib / "mine" / "p2").symlink_to(secret)
+c, _ = save({"slug": "p2", "owner": "id:p2", "stem": "mix", "pad": 1, "t0": 0, "t1": 0.5})
+check("a symlinked mine/<slug> is refused, nothing written there", c == 400 and sorted(x.name for x in secret.iterdir()) == ["key.txt", "vocals.wav"])
 
 # vs.py run with a chopper that fails marks the request failed (no venv here -> flip.sh exits 1)
 c, b = req("/requests", "POST", json.dumps({"url": "https://www.youtube.com/watch?v=zzz"}).encode(), H)
@@ -340,6 +486,37 @@ time.sleep(1.5)
 h.stdin.close(); h.wait()
 _, err = c.communicate(timeout=30)
 check("slug taken by --force while waiting -> stops", c.returncode != 0 and "given to another song" in err)
+
+# the player's own bank (mine/<slug>, the chop editor's) across re-chops
+fp.MINE.mkdir(exist_ok=True)
+(fp.MINE / "minetaken").mkdir()
+check("taken() counts mine/<slug>: a new song never gets a slug with someone's bank", fp.taken("minetaken", "id:q"))
+song(fp.SONGS / "mb.wav", 30, 4); (fp.SONGS / "mb.source").write_text("id:a\n")
+bk = fp.MINE / "mb"; bk.mkdir(); (bk / "regions.json").write_bytes(b'{"owner": "id:a", "rev": 3, "pads": {}}')
+(bk / "p01-r0001-abcdef.wav").write_bytes(b"RIFF-cut")
+before = {f.name: f.read_bytes() for f in bk.iterdir()}
+check("a same-song --force re-chop leaves mine/ byte-identical",
+      fp.choose_slug("mb", "id:a", slug_arg="mb", force=True) == "mb" and {f.name: f.read_bytes() for f in bk.iterdir()} == before)
+# another song takes the slug, and its run dies right after the bank moved (the audio rename fails)
+real = Path.rename
+def boom(self, target):
+    if self.name == "mb.wav": raise OSError("disk gone")
+    return real(self, target)
+Path.rename = boom
+try:
+    fp.choose_slug("x", "id:b", slug_arg="mb", force=True)
+    died = False
+except OSError:
+    died = True
+Path.rename = real
+moved = list(fp.MINE.glob("mb.prev-*"))
+check("reassignment: the bank moves FIRST (a run dying after it leaves no bank under the slug)",
+      died and not bk.exists() and len(moved) == 1 and {f.name: f.read_bytes() for f in moved[0].iterdir()} == before)
+check("... the retry finishes the move, the old bank kept once, intact",
+      fp.choose_slug("x", "id:b", slug_arg="mb", force=True) == "mb" and not bk.exists()
+      and list(fp.MINE.glob("mb.prev-*")) == moved and (fp.SONGS / "mb.source").read_text().strip() == "id:b")
+d = np.zeros((1000, 2)); sp = fp.span(d, 100, -1, 20)
+check("span: the frames cut() takes, clipped to the audio", sp == {"a": 0, "b": 1000, "sr": 100} and fp.span(d, 100, 1.004, 2)["a"] == 100)
 sys.exit(bad)
 PY
 else

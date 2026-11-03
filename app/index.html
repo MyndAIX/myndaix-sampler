@@ -29,6 +29,7 @@
   button.on { border-color:var(--hi); color:var(--hi); }
   button:disabled { opacity:.3; cursor:default; }
   button .fk { color:var(--dim); font-family:ui-monospace, Menlo, monospace; margin-right:4px; }
+  .edlink { color:var(--dim); font-size:12px; margin-left:4px; }
   .pitch { margin-left:auto; display:flex; gap:4px; align-items:center; font-family:ui-monospace, Menlo, monospace; font-size:12px; }
   .pitch .val { min-width:92px; text-align:center; }
   .add { display:flex; gap:6px; margin:10px 0; flex-wrap:wrap; }
@@ -85,26 +86,28 @@
     <label>RIGHT <input type="range" id="vol-R" min="0" max="100" value="80" aria-label="right volume"><span class="num" id="vol-R-n">80</span></label>
   </div>
   <p class="help">
-    <b>Left pads:</b> 1 2 3 4 / Q W E R / A S D F / Z X C V &nbsp;·&nbsp; banks <b>Shift+1–4</b> &nbsp;·&nbsp; pitch <b>G</b> up, <b>B</b> down, <b>T</b> reset &nbsp;·&nbsp; <b>5</b> sync<br>
-    <b>Right pads:</b> 7 8 9 0 / U I O P / J K L ; / M , . / &nbsp;·&nbsp; banks <b>Shift+7–0</b> &nbsp;·&nbsp; pitch <b>H</b> up, <b>N</b> down, <b>Y</b> reset &nbsp;·&nbsp; <b>6</b> sync<br>
+    <b>Left pads:</b> 1 2 3 4 / Q W E R / A S D F / Z X C V &nbsp;·&nbsp; banks <b>Shift+1–4</b>, your chops <b>Shift+5</b> &nbsp;·&nbsp; pitch <b>G</b> up, <b>B</b> down, <b>T</b> reset &nbsp;·&nbsp; <b>5</b> sync<br>
+    <b>Right pads:</b> 7 8 9 0 / U I O P / J K L ; / M , . / &nbsp;·&nbsp; banks <b>Shift+7–0</b>, your chops <b>Shift+6</b> &nbsp;·&nbsp; pitch <b>H</b> up, <b>N</b> down, <b>Y</b> reset &nbsp;·&nbsp; <b>6</b> sync<br>
     Pad 1 is bottom-left on each side.
     Pitch moves speed and pitch together, one semitone a step, like a classic sampler. In the loops bank a pad starts or stops its loop on the next bar.<br>
     <b>SYNC</b> on a deck makes it follow the other deck: same tempo (a slow song locks at half time), its loops land on the other deck's bar lines,
     and it keeps following when the other deck's pitch moves. Like a record, the key moves with the speed. Press SYNC again, or move that deck's pitch, to let go.
-    <b>×2 / ÷2</b> fix a tempo that was read at double or half speed.
+    <b>×2 / ÷2</b> fix a tempo that was read at double or half speed.<br>
+    <b>Chop editor</b> (the link on each deck): the whole song per stem with its bars. Pick your own chops and drop them on pads; they show up here as bank <b>mine</b>.
   </p>
 </main>
 <div id="start">Click to start the audio</div>
 <script src="sync.js"></script>
+<script src="chopmath.js"></script>
 <script>
 "use strict";
 const BANK_ORDER = ["loops", "synth16", "mix16", "vocal16"];
 // Pad 1 is bottom-left, as on Maschine. keys[i] plays pad i+1.
 const DECKS = {
   L: { keys: ["z","x","c","v","a","s","d","f","q","w","e","r","1","2","3","4"], fkeys: ["F1","F2","F3","F4"], bankcodes: ["Digit1","Digit2","Digit3","Digit4"],
-       up: "g", down: "b", reset: "t", defaultBank: "loops" },
+       minecode: "Digit5", minekey: "5", up: "g", down: "b", reset: "t", defaultBank: "loops" },
   R: { keys: ["m",",",".","/","j","k","l",";","u","i","o","p","7","8","9","0"], fkeys: ["F5","F6","F7","F8"], bankcodes: ["Digit7","Digit8","Digit9","Digit0"],
-       up: "h", down: "n", reset: "y", defaultBank: "synth16" },
+       minecode: "Digit6", minekey: "6", up: "h", down: "n", reset: "y", defaultBank: "synth16" },
 };
 const ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "interactive" });
 const SM = window.SyncMath;
@@ -117,7 +120,7 @@ for (const id in DECKS) {
   // tails: loop sources already told to stop on a coming bar line, still sounding until then
   Object.assign(DECKS[id], { id, pack: null, meta: null, banks: {}, bank: null, loops: {}, tails: new Set(), clock0: null,
                              semis: 0, fine: 1, mul: 1, vol: 80, xf: Math.SQRT1_2, volGain, xfGain,
-                             view: null, canvas: null });
+                             view: null, canvas: null, labels: {}, mineGen: 0 });
 }
 
 const cache = {};          // "pack/file" -> AudioBuffer, shared so both decks on one pack decode once
@@ -139,7 +142,8 @@ function savedMul(slug) {
 async function loadPack(d, slug) {
   stopLoops(d);
   if (S.sync) syncOff();
-  d.pack = slug; d.fine = 1; d.mul = savedMul(slug);
+  d.mineGen++;                     // a bank fetch still running for the old pack must not land here
+  d.pack = slug; d.fine = 1; d.mul = savedMul(slug); d.labels = {};
   const meta = await (await fetch(`/packs/${encodeURIComponent(slug)}/analysis.json`, { cache: "no-store" })).json();
   const banks = {};
   for (const f of meta.files || []) {
@@ -158,9 +162,41 @@ async function loadPack(d, slug) {
     cache[key] = await ctx.decodeAudioData(await (await fetch(url)).arrayBuffer());
   }));
   renderDeck(d);
+  await refreshMine(d);
 }
 
 function buf(d, f) { return cache[d.pack + "/" + f]; }
+
+// The player's own bank ("mine", made in chop.html), refetched on pack load, window focus and the
+// server's "mine" hint after a save. It swaps only that bank: loops, sync and the chosen bank keep
+// going. Slots stay in place (pad 5 is slot 4, empty pads stay empty), and each cut has its own
+// file name, so a cached buffer is never stale audio. mineGen drops a fetch that a newer one (or a
+// pack load) overtook, so a slow older bank can't land on top of a newer one.
+async function refreshMine(d) {
+  const slug = d.pack, gen = ++d.mineGen;
+  if (!slug) return;
+  let j;
+  try { j = await (await fetch(`/api/mine/${encodeURIComponent(slug)}`, { cache: "no-store" })).json(); }
+  catch (e) { return; }
+  if (gen !== d.mineGen) return;
+  const sl = ChopMath.slots(j && j.pads), slots = new Array(16).fill(undefined), labels = {};
+  await Promise.all(sl.map(async (e, i) => {
+    if (!e) return;
+    const f = "mine/" + e.file, key = slug + "/" + f;
+    try {
+      if (!cache[key]) cache[key] = await ctx.decodeAudioData(await (await fetch(`/mine/${encodeURIComponent(slug)}/${encodeURIComponent(e.file)}`)).arrayBuffer());
+      slots[i] = f; labels[f] = `${e.stem} ${ChopMath.clock(e.a / e.sr)}`;
+    } catch (err) { /* this pad stays empty */ }
+  }));
+  if (gen !== d.mineGen) return;
+  if (slots.some(Boolean)) d.banks.mine = slots; else delete d.banks.mine;
+  d.labels = labels;
+  // let go of cuts no deck on this pack uses any more (a sounding one keeps its own reference)
+  const used = new Set(Object.values(DECKS).filter(x => x.pack === slug).flatMap(x => (x.banks.mine || []).filter(Boolean)).map(f => slug + "/" + f));
+  for (const k of Object.keys(cache)) if (k.startsWith(slug + "/mine/") && !used.has(k)) delete cache[k];
+  if (d.bank === "mine" && !d.banks.mine) d.bank = BANK_ORDER.find(b => d.banks[b]);
+  renderDeck(d);
+}
 
 // Bar clock per deck, in real seconds; at a changed pitch the bar is shorter or longer
 const nativeBar = d => d.meta ? SM.bar(d.meta, d.mul) : 2;
@@ -469,6 +505,14 @@ function renderDeck(d) {
     btn.onclick = () => setBank(d, b);
     row.append(btn);
   });
+  const mb = document.createElement("button");
+  mb.innerHTML = `<span class="fk">⇧${d.minekey}</span>`; mb.append("mine");
+  mb.className = d.bank === "mine" ? "on" : ""; mb.disabled = !d.banks.mine;
+  mb.title = "your own chops (make them in the chop editor)"; mb.onclick = () => setBank(d, "mine");
+  const ed = document.createElement("a");
+  ed.href = `/chop.html?pack=${encodeURIComponent(d.pack)}`; ed.target = "_blank"; ed.textContent = "chop editor";
+  ed.className = "edlink";
+  row.append(mb, ed);
   const pitch = document.createElement("div"); pitch.className = "pitch";
   const dn = document.createElement("button"); dn.textContent = "▼"; dn.onclick = () => setPitch(d, d.semis - 1);
   const val = document.createElement("span"); val.className = "val";
@@ -504,7 +548,7 @@ function renderDeck(d) {
     p.className = "pad" + (f ? "" : " empty") + (f && d.loops[f] ? " looping" : "");
     p.dataset.pad = i;
     p.innerHTML = `<span class="n">${i + 1}</span><span class="nm"></span><span class="k">${d.keys[i].toUpperCase()}</span>`;
-    p.querySelector(".nm").textContent = f ? f.split("/").pop().replace(/\.wav$/, "") : "";
+    p.querySelector(".nm").textContent = f ? (d.labels[f] || f.split("/").pop().replace(/\.wav$/, "")) : "";
     p.onpointerdown = () => hit(d, i, "you", "click");
     grid.append(p);
   }
@@ -535,6 +579,11 @@ async function poll() {
         // unlike the button, "sync R" never toggles off: it (re)locks R to the other deck
         if (DECKS[c.deck]) syncTo(DECKS[c.deck]);
         else { syncOff(); say("AI: sync off"); pushState(); }
+        continue;
+      }
+      if (c.cmd === "mine") {
+        // a save in the chop editor (or vs.py chop): a nudge only, the fetch is the truth
+        for (const d of Object.values(DECKS)) if (d.pack === c.pack) refreshMine(d);
         continue;
       }
       if (c.cmd === "xfade") { setXfade(c.value); say(`AI: crossfader ${S.xfade}`); continue; }
@@ -569,6 +618,9 @@ document.addEventListener("keydown", e => {
   for (const d of Object.values(DECKS)) {
     const j = Math.max(d.fkeys.indexOf(e.key), e.shiftKey ? d.bankcodes.indexOf(e.code) : -1);
     if (j >= 0) { e.preventDefault(); if (!e.repeat) setBank(d, BANK_ORDER[j]); return; }
+    // Shift+5 / Shift+6: the player's own bank. Its own code, not a 5th bankcodes entry, so the
+    // top-row pad fallback below (12 + bankcodes index) is unchanged; plain 5 / 6 stay sync.
+    if (e.shiftKey && e.code === d.minecode) { e.preventDefault(); if (!e.repeat) setBank(d, "mine"); return; }
   }
   if (e.repeat) return;
   const k = e.key.toLowerCase();
@@ -657,6 +709,10 @@ async function pollRequests(once) {
   } catch (e) { /* server restarting */ }
   if (!once) { clearTimeout(reqTimer); reqTimer = setTimeout(pollRequests, 1500); }
 }
+
+// another tab may have changed a bank while this one was in the background (and a server restart
+// can drop the "mine" hint), so look again on focus
+window.addEventListener("focus", () => { for (const d of Object.values(DECKS)) if (d.pack) refreshMine(d); });
 
 $("start").onclick = async () => { await ctx.resume(); $("start").remove(); pushState(); };
 
