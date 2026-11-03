@@ -29,12 +29,11 @@ No AI? Do it by hand: `./setup.sh` once, `./run.sh` to start, and `./vs.py run 1
 | | Left deck | Right deck |
 |---|---|---|
 | Pads 1-4 / 5-8 / 9-12 / 13-16 | Z X C V / A S D F / Q W E R / 1 2 3 4 | M , . / / J K L ; / U I O P / 7 8 9 0 |
-| Banks: loops, synth16, mix16, vocal16 | Shift + 1 2 3 4 (or fn + F1–F4) | Shift + 7 8 9 0 (or fn + F5–F8) |
+| Banks: loops, synth16, mix16, vocal16 | Shift + 1 2 3 4 | Shift + 7 8 9 0 |
 | Pitch up / down / reset | G / B / T | H / N / Y |
 | Sync to the other deck | 5 | 6 |
 
 - Pad 1 is bottom-left on each side. Space stops all loops.
-- On a Mac keyboard, hold **fn** with the F-keys unless they're set to standard.
 - Pitch moves speed and pitch together, a semitone a step, like an old-school sampler.
 - In the loops bank, a pad starts or stops its loop on the next bar, in time with the loops already running.
 - Each deck has a waveform screen: the sample you just hit, with a playhead.
