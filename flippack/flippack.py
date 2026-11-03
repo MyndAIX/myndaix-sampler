@@ -32,6 +32,7 @@ DEFAULT_HOME = Path(__file__).resolve().parent.parent / "library"
 ROOT = Path(os.environ.get("SAMPLER_HOME") or DEFAULT_HOME)
 INBOX, DOWNLOADS, SONGS = ROOT / "inbox", ROOT / "downloads", ROOT / "songs"
 STEMS_DIR, PACKS = ROOT / "stems/htdemucs_6s", ROOT / "packs"
+MINE = ROOT / "mine"            # the player's own banks (serve.py, chop editor); never written here
 MAX_SECS = 15 * 60             # longer songs take too much memory to analyze (all stems are loaded)
 SLUG_LOCK = None               # fd of the lock on the slug being made; held until exit
 STEMS = ["drums", "bass", "other", "vocals", "guitar", "piano"]
@@ -132,7 +133,7 @@ def taken(slug, ident):
     # inbox/<slug>.wav: libraries made before songs/ existed kept the song there. Today inbox/ also
     # holds the upload being chopped, and that file must not block its own name, so it counts only
     # when it is a different song.
-    if any(os.path.lexists(x) for x in (SONGS / f"{slug}.wav", STEMS_DIR / slug, PACKS / slug)):
+    if any(os.path.lexists(x) for x in (SONGS / f"{slug}.wav", STEMS_DIR / slug, PACKS / slug, MINE / slug)):
         return True
     old = INBOX / f"{slug}.wav"
     return os.path.lexists(old) and not (old.is_file() and file_identity(old) == ident)
@@ -157,6 +158,13 @@ def choose_slug(title, ident, slug_arg=None, force=False):
                     sys.exit(f"{slug_arg} already holds another song; pass --force to replace it "
                              "(the old audio, stems and pack are kept, renamed)")
                 stamp = time.strftime("%Y%m%d-%H%M%S")
+                # the player's own bank (chop editor) moves FIRST, with the pid so two moves in one
+                # second can't collide: its regions.json names song A, and serve.py refuses a bank whose
+                # owner isn't the current .source, so even a run that dies after this never shows A's
+                # picks on song B
+                mine = MINE / slug_arg
+                if os.path.lexists(mine):
+                    mine.rename(mine.with_name(f"{mine.name}.prev-{stamp}-{os.getpid()}"))
                 # the pack moves too: if B's run then fails, a retry of B must not find A's pack
                 # under B's .source and load it as B
                 for p in (SONGS / f"{slug_arg}.wav", STEMS_DIR / slug_arg, PACKS / slug_arg):
@@ -526,6 +534,12 @@ def cut(data, sr, t0, t1, ms=2):
     return fade(data[a:b].copy(), sr, ms)
 
 
+def span(data, sr, t0, t1):
+    """The frames cut() really takes, clipped to the audio: what the chop editor draws for a chop."""
+    n = len(data)
+    return dict(a=min(n, max(0, int(round(t0 * sr)))), b=min(n, max(0, int(round(t1 * sr)))), sr=int(sr))
+
+
 def vocal_pieces(v, sr, n=16, lo=0.3, hi=3.0, enough=8):
     """Up to n loudest lo-hi s vocal phrases, in song order, and the gap depth (dB) that found them.
 
@@ -675,12 +689,14 @@ def main():
     log("cutting chops")
     beat = barlen / 4
     chops = {}
+    regions = {}        # chop file -> the stem and frames it was cut from (the chop editor draws these)
     mel = "other" if "other" in loops else next((s for s in ("guitar", "piano") if s in loops), None)
     if mel:
         t0 = bars[loops[mel]["bar"] - 1]
         for k in range(16):
-            sf.write(str(tmp / f"chops/synth16/{LABEL[mel].split('/')[0]} {k + 1:02d}.wav"),
-                     cut(full[mel][0], fsr, t0 + k * beat, t0 + (k + 1) * beat, 3), fsr, subtype=subtype)
+            name = f"chops/synth16/{LABEL[mel].split('/')[0]} {k + 1:02d}.wav"
+            sf.write(str(tmp / name), cut(full[mel][0], fsr, t0 + k * beat, t0 + (k + 1) * beat, 3), fsr, subtype=subtype)
+            regions[name] = dict(stem=mel, **span(full[mel][0], fsr, t0 + k * beat, t0 + (k + 1) * beat))
         chops["synth16"] = f"16 one-beat hits of the {LABEL[mel]} loop, in order (bar {loops[mel]['bar']})"
     if md is not None:
         t0 = bars[mi]
@@ -688,12 +704,14 @@ def main():
             sf.write(str(tmp / f"chops/mix16/mix {k + 1:02d}.wav"),
                      cut(md, msr, t0 + k * beat, t0 + (k + 1) * beat, 3), msr,
                      subtype=sf.info(str(mixwav)).subtype)
+            regions[f"chops/mix16/mix {k + 1:02d}.wav"] = dict(stem="mix", **span(md, msr, t0 + k * beat, t0 + (k + 1) * beat))
         chops["mix16"] = f"16 one-beat hits of the full mix, in order (bar {mi + 1})"
     cand, gap_db = vocal_pieces(y["vocals"], SR)
     vrows = []
     for k, (_, a, b) in enumerate(cand):
         sf.write(str(tmp / f"chops/vocal16/vocal {k + 1:02d}.wav"),
                  cut(full["vocals"][0], fsr, max(0, a - 0.01), b + 0.05, 5), fsr, subtype=subtype)
+        regions[f"chops/vocal16/vocal {k + 1:02d}.wav"] = dict(stem="vocals", **span(full["vocals"][0], fsr, max(0, a - 0.01), b + 0.05))
         bar_no = int(np.searchsorted(bars, a, side="right"))
         vrows.append((k + 1, round(a, 2), round(b - a, 2), bar_no))
     chops["vocal16"] = (f"{len(vrows)} vocal phrases cut at breath gaps ({gap_db} dB down), in song order, "
@@ -763,7 +781,7 @@ def main():
                 key_fit=round(kc, 3), scale=sc, barlen=round(barlen, 5), first_drum_bar_s=round(first_drum_bar, 4),
                 first_drum_bar=anchor + 1, nbars=nb, bars_s=[round(float(b), 4) for b in bars],
                 downbeat_score={int(k): round(float(v), 4) for k, v in pscore.items()},
-                loops=loops, chops=chops,
+                loops=loops, chops=chops, regions=regions,
                 files=sorted(str(f.relative_to(tmp)) for f in tmp.rglob("*.wav")),
                 sections=[dict(bars=[s["a"] + 1, s["b"]], playing=list(s["act"]), letter=s["letter"],
                                guess=s["guess"]) for s in segs])

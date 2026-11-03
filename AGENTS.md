@@ -63,7 +63,13 @@ A failed request can be retried with `./vs.py run <id>`.
 ./vs.py xfade 50           # crossfader 0-100, 0 = only the left deck
 ./vs.py stop               # stop all loops
 ./vs.py say "text"         # show a message on the sampler screen
+./vs.py mine <pack>        # the person's own bank (chop editor): pads, stems, whether it can be saved
+./vs.py chop <pack> 5 vocals 61.2 63.9   # cut a stem from 61.2 to 63.9 s onto pad 5 of bank mine
+./vs.py chop <pack> 5 clear              # empty pad 5 (its cut stays on disk)
 ```
+Stems: vocals drums bass other guitar piano mix. Bar times are in the pack's `analysis.json` (`bars_s`).
+For vocals, cut a whole natural phrase, never stretched; leave pads empty rather than filling them.
+Ask before replacing a pad the person filled.
 In `state`, each hit says who made it (`you` = the person, `ai` = you) and how (`key`, `click`, `midi`).
 
 ## Where things are
@@ -72,6 +78,8 @@ In `state`, each hit says who made it (`you` = the person, `ai` = you) and how (
 |---|---|
 | `app/index.html` | the whole instrument (Web Audio, no build step) |
 | `app/sync.js` | the tempo-sync math, kept separate so `test.sh` can check it in node |
+| `app/chop.html` | the chop editor: whole stems with bar lines, pick chops, drop them on bank mine |
+| `app/chopmath.js` | the chop editor's bar/beat grid and snapping, kept separate so node can check it |
 | `tests/sim.js` | runs the page's script in node on a fake audio clock (sync timing, stops); `test.sh` calls it |
 | `serve.py` | local server: the app, the packs, the command queue, song requests, uploads (127.0.0.1 only) |
 | `vs.py` | your command line for all of the above |
@@ -79,5 +87,5 @@ In `state`, each hit says who made it (`you` = the person, `ai` = you) and how (
 | `flip.sh` | runs the chopper in `.venv` (`vs.py run` calls it) |
 | `setup.sh`, `run.sh`, `config.sh` | setup, start, shared settings |
 | `test.sh` | fast check (server, `vs.py`, sync math; the chopper too once `.venv` exists); run it after any change |
-| `library/` | made on this machine: `inbox/` dropped files, `downloads/`, `songs/` (the chopper's audio), `stems/`, `packs/`, `requests.json` |
+| `library/` | made on this machine: `inbox/` dropped files, `downloads/`, `songs/` (the chopper's audio), `stems/`, `packs/`, `mine/` (the person's own chops), `requests.json` |
 | `local.env` | optional, not committed: `SAMPLER_HOME=` to keep the library elsewhere, `VS_VENV=` for another venv |

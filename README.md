@@ -32,6 +32,7 @@ No AI? Do it by hand: `./setup.sh` once, `./run.sh` to start, and `./vs.py run 1
 | Banks: loops, synth16, mix16, vocal16 | Shift + 1 2 3 4 | Shift + 7 8 9 0 |
 | Pitch up / down / reset | G / B / T | H / N / Y |
 | Sync to the other deck | 5 | 6 |
+| Your own chops (bank mine) | Shift + 5 | Shift + 6 |
 
 - Pad 1 is bottom-left on each side. Space stops all loops.
 - Pitch moves speed and pitch together, a semitone a step, like an old-school sampler.
@@ -44,6 +45,19 @@ No AI? Do it by hand: `./setup.sh` once, `./run.sh` to start, and `./vs.py run 1
   move that deck's own pitch, to let go.
 - **×2 / ÷2** fix a tempo that was read at double or half speed.
 - The mixer under the decks: a volume per deck and a crossfader (full left mutes the right deck).
+
+### Chop editor: pick your own chops
+
+The AI's chops are a starting point. The **chop editor** link on each deck opens the whole song, one
+stem at a time (vocals, drums, bass, other, guitar, piano, or the full mix), with its bar numbers. The
+AI's chops and loops show in blue, yours in green.
+
+- Drag across the wave to select. It snaps to the beat; hold **Shift** to snap to the bar, **Alt** for no snap.
+- **Space** plays the selection, **L** loops it, **Esc** stops. Click a blue region to select it.
+- Drag the orange chip onto a pad (or Shift+click a pad) to keep it. Click a pad to hear it, × to empty it.
+- Cuts are exact: never stretched or warped. Empty pads are fine.
+- Your chops show up on the decks as bank **mine** (Shift+5 left, Shift+6 right). They live in
+  `library/mine/<song>/`, outside the pack, so they survive a reload and a re-chop of the same song.
 
 ## What a song turns into
 
