@@ -36,6 +36,13 @@
       return (((t - clock0) * r) % dur + dur) % dur;
     },
 
+    // Do two bar grids share bar lines? Their bars are a power of 2 apart, so it is enough that the
+    // coarser grid's start sits on a line of the finer one.
+    nests(c0a, barA, c0b, barB) {
+      const k = (c0b - c0a) / Math.min(barA, barB);
+      return Math.abs(k - Math.round(k)) < 1e-4;
+    },
+
     // The bar a loop position is closest to, wrapped into the loop.
     nearestBar(pos, bar, nbars) {
       return Math.round(pos / bar) % nbars;

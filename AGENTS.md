@@ -72,6 +72,7 @@ In `state`, each hit says who made it (`you` = the person, `ai` = you) and how (
 |---|---|
 | `app/index.html` | the whole instrument (Web Audio, no build step) |
 | `app/sync.js` | the tempo-sync math, kept separate so `test.sh` can check it in node |
+| `tests/sim.js` | runs the page's script in node on a fake audio clock (sync timing, stops); `test.sh` calls it |
 | `serve.py` | local server: the app, the packs, the command queue, song requests, uploads (127.0.0.1 only) |
 | `vs.py` | your command line for all of the above |
 | `flippack/flippack.py` | the chopper: song -> stems -> 8-bar loops + 16-chop banks + tempo, key and sections |

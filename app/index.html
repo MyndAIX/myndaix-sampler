@@ -114,7 +114,8 @@ for (const id in DECKS) {
   const volGain = ctx.createGain(), xfGain = ctx.createGain();
   volGain.gain.value = 0.8; xfGain.gain.value = Math.SQRT1_2;
   volGain.connect(xfGain); xfGain.connect(ctx.destination);
-  Object.assign(DECKS[id], { id, pack: null, meta: null, banks: {}, bank: null, loops: {}, clock0: null,
+  // tails: loop sources already told to stop on a coming bar line, still sounding until then
+  Object.assign(DECKS[id], { id, pack: null, meta: null, banks: {}, bank: null, loops: {}, tails: new Set(), clock0: null,
                              semis: 0, fine: 1, mul: 1, vol: 80, xf: Math.SQRT1_2, volGain, xfGain,
                              view: null, canvas: null });
 }
@@ -199,7 +200,7 @@ function toggleLoop(d, f) {
   const cur = d.loops[f];
   if (cur) {
     const stopAt = nextBar(d);
-    cur.src.stop(stopAt); delete d.loops[f];
+    retire(d, cur.src, stopAt); delete d.loops[f];
     // keep drawing it until it actually stops on the bar line
     if (d.view && d.view.loop && d.view.f === f) d.view.until = stopAt;
   } else {
@@ -207,6 +208,13 @@ function toggleLoop(d, f) {
     d.view = { f, b: d.loops[f].src.buffer, name: nm(f), loop: true, at: d.loops[f].at };
   }
   renderDeck(d);
+}
+
+// A loop source that keeps sounding until `until` (a bar line), tracked so a stop, a pack load or a
+// speed change still reaches it.
+function retire(d, src, until) {
+  src.until = until; src.stop(until);
+  d.tails.add(src); src.onended = () => d.tails.delete(src);
 }
 
 function startLoop(d, f, at) {
@@ -219,7 +227,8 @@ function startLoop(d, f, at) {
 
 function stopLoops(d) {
   for (const f in d.loops) d.loops[f].src.stop();
-  d.loops = {}; d.clock0 = null;
+  for (const src of d.tails) src.stop();
+  d.loops = {}; d.tails.clear(); d.clock0 = null;
   if (d.view && d.view.loop) d.view.idle = true;
   if (d.meta) renderDeck(d);
 }
@@ -308,8 +317,23 @@ function setBank(d, name) {
 function applyRate(d, semis, fine, now = ctx.currentTime) {
   const r0 = rate(d);
   d.semis = semis; d.fine = fine;
-  if (d.clock0 !== null) d.clock0 = SM.reanchor(d.clock0, now, r0, rate(d));
-  for (const f in d.loops) d.loops[f].src.playbackRate.setValueAtTime(rate(d), now);
+  const r1 = rate(d);
+  // a coming time keeps its place in the music: a bar line 1 s away at the old speed moves to r0/r1 s away
+  const warp = t => SM.reanchor(t, now, r0, r1);
+  if (d.clock0 !== null) d.clock0 = warp(d.clock0);
+  for (const src of d.tails) {
+    src.playbackRate.setValueAtTime(r1, now);
+    if (src.until > now) { src.until = warp(src.until); src.stop(src.until); }
+  }
+  for (const f in d.loops) {
+    const l = d.loops[f];
+    if (l.at > now) {
+      // not started yet: its start time and offset were worked out at the old speed, so schedule it again
+      l.src.onended = null; l.src.stop();
+      startLoop(d, f, warp(l.at));
+      if (d.view && d.view.loop && d.view.f === f) d.view.at = d.loops[f].at;
+    } else l.src.playbackRate.setValueAtTime(r1, now);
+  }
 }
 
 const follower = () => S.sync && DECKS[S.sync.follower];
@@ -357,7 +381,7 @@ function syncTo(F) {
     const b = SM.nearestBar(SM.loopPos(F.clock0, at, rate(F), dur), nb, Math.max(1, Math.round(dur / nb)));
     F.semis = 0; F.fine = r1;
     F.clock0 = at - b * nb / r1;
-    for (const f of files) { F.loops[f].src.stop(at); startLoop(F, f, at); }
+    for (const f of files) { retire(F, F.loops[f].src, at); startLoop(F, f, at); }
     if (F.view && F.view.loop && F.loops[F.view.f]) F.view.at = at;
   } else applyRate(F, 0, r1, now);
   say(`${F.id === "L" ? "LEFT" : "RIGHT"} follows ${L.id === "L" ? "LEFT" : "RIGHT"}` +
@@ -374,9 +398,13 @@ function setMul(d, mul) {
   d.mul = d.mul === mul ? 1 : mul;          // pressing the lit button again goes back to the detected tempo
   try { localStorage.setItem(mulKey(d.pack), String(d.mul)); } catch (e) { /* not remembered, still applied */ }
   if (S.sync) {
-    // ×2/÷2 relabels the bar; re-fold so the follower keeps the same speed on the new bar size
-    S.sync.m = SM.fold(nativeBar(follower()), barSec(leader()));
+    // ×2/÷2 relabels the bar; re-fold so the follower keeps the same speed on the new bar size.
+    // The new bars can land between the other deck's (e.g. both 4 s bars, starting 2 s apart):
+    // then the follower restarts on the leader's next bar line.
+    const F = follower(), L = leader();
+    S.sync.m = SM.fold(nativeBar(F), barSec(L));
     follow();
+    if (running(F) && running(L) && !SM.nests(L.clock0, barSec(L), F.clock0, barSec(F))) syncTo(F);
   }
   renderDeck(d); pushState();
 }

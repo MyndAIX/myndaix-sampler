@@ -201,6 +201,8 @@ check("loopPos wraps negative times", near(SM.loopPos(10, 9, 1, 4), 3));
 check("nearestBar rounds and wraps the loop end to bar 0", SM.nearestBar(7.9, 1, 8) === 0 && SM.nearestBar(2.4, 1, 8) === 2);
 process.exit(bad);
 JS
+  # the page's own script on a fake audio clock: loops on the right bar phase, nothing left sounding
+  node "$HERE/tests/sim.js" "$HERE" || exit 1
 else
   echo "SKIP  sync math (node not installed)"
 fi
