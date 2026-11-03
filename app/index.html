@@ -53,6 +53,14 @@
   .pad .k { align-self:flex-end; font-family:ui-monospace, Menlo, monospace; }
   .help { color:var(--dim); font-size:12px; margin-top:12px; line-height:1.6; }
   .help b { color:var(--text); }
+  button.sync.on { background:var(--hi); color:#111; }
+  .mixer { display:grid; grid-template-columns:1fr 1.4fr 1fr; gap:24px; align-items:center; margin:12px 0 0;
+           background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 12px;
+           font-size:12px; color:var(--dim); }
+  .mixer label { display:flex; gap:8px; align-items:center; }
+  .mixer input { flex:1; accent-color:var(--hi); min-width:0; }
+  .mixer .num { font-family:ui-monospace, Menlo, monospace; min-width:30px; text-align:right; color:var(--text); }
+  @media (max-width: 760px) { .mixer { grid-template-columns:1fr; gap:8px; } }
   #start { position:fixed; inset:0; background:rgba(0,0,0,.8); display:flex; align-items:center; justify-content:center;
            font-size:18px; cursor:pointer; }
 </style>
@@ -71,14 +79,23 @@
     <section class="deck" id="deck-L"></section>
     <section class="deck" id="deck-R"></section>
   </div>
+  <div class="mixer">
+    <label>LEFT <input type="range" id="vol-L" min="0" max="100" value="80" aria-label="left volume"><span class="num" id="vol-L-n">80</span></label>
+    <label>L <input type="range" id="xfade" min="0" max="100" value="50" aria-label="crossfader"> R</label>
+    <label>RIGHT <input type="range" id="vol-R" min="0" max="100" value="80" aria-label="right volume"><span class="num" id="vol-R-n">80</span></label>
+  </div>
   <p class="help">
-    <b>Left pads:</b> 1 2 3 4 / Q W E R / A S D F / Z X C V &nbsp;·&nbsp; banks <b>F1–F4</b> &nbsp;·&nbsp; pitch <b>G</b> up, <b>B</b> down, <b>T</b> reset<br>
-    <b>Right pads:</b> 7 8 9 0 / U I O P / J K L ; / M , . / &nbsp;·&nbsp; banks <b>F5–F8</b> &nbsp;·&nbsp; pitch <b>H</b> up, <b>N</b> down, <b>Y</b> reset<br>
+    <b>Left pads:</b> 1 2 3 4 / Q W E R / A S D F / Z X C V &nbsp;·&nbsp; banks <b>F1–F4</b> &nbsp;·&nbsp; pitch <b>G</b> up, <b>B</b> down, <b>T</b> reset &nbsp;·&nbsp; <b>5</b> sync<br>
+    <b>Right pads:</b> 7 8 9 0 / U I O P / J K L ; / M , . / &nbsp;·&nbsp; banks <b>F5–F8</b> &nbsp;·&nbsp; pitch <b>H</b> up, <b>N</b> down, <b>Y</b> reset &nbsp;·&nbsp; <b>6</b> sync<br>
     Pad 1 is bottom-left on each side. On a Mac keyboard hold <b>fn</b> with the F-keys (unless your F-keys are set to standard).
-    Pitch moves speed and pitch together, one semitone a step, like a classic sampler. In the loops bank a pad starts or stops its loop on the next bar.
+    Pitch moves speed and pitch together, one semitone a step, like a classic sampler. In the loops bank a pad starts or stops its loop on the next bar.<br>
+    <b>SYNC</b> on a deck makes it follow the other deck: same tempo (a slow song locks at half time), its loops land on the other deck's bar lines,
+    and it keeps following when the other deck's pitch moves. Like a record, the key moves with the speed. Press SYNC again, or move that deck's pitch, to let go.
+    <b>×2 / ÷2</b> fix a tempo that was read at double or half speed.
   </p>
 </main>
 <div id="start">Click to start the audio</div>
+<script src="sync.js"></script>
 <script>
 "use strict";
 const BANK_ORDER = ["loops", "synth16", "mix16", "vocal16"];
@@ -89,20 +106,39 @@ const DECKS = {
   R: { keys: ["m",",",".","/","j","k","l",";","u","i","o","p","7","8","9","0"], fkeys: ["F5","F6","F7","F8"],
        up: "h", down: "n", reset: "y", defaultBank: "synth16" },
 };
-for (const id in DECKS) Object.assign(DECKS[id], { id, pack: null, meta: null, banks: {}, bank: null,
-                                                   loops: {}, clock0: null, semis: 0, view: null, canvas: null });
-
 const ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "interactive" });
+const SM = window.SyncMath;
+// fine: the tempo under the semitone steps (sync sets it). mul: the ×2/÷2 tempo fix.
+// Mixer per deck: sources -> volGain (deck volume) -> xfGain (crossfader) -> speakers.
+for (const id in DECKS) {
+  const volGain = ctx.createGain(), xfGain = ctx.createGain();
+  volGain.gain.value = 0.8; xfGain.gain.value = Math.SQRT1_2;
+  volGain.connect(xfGain); xfGain.connect(ctx.destination);
+  Object.assign(DECKS[id], { id, pack: null, meta: null, banks: {}, bank: null, loops: {}, clock0: null,
+                             semis: 0, fine: 1, mul: 1, vol: 80, xf: Math.SQRT1_2, volGain, xfGain,
+                             view: null, canvas: null });
+}
+
 const cache = {};          // "pack/file" -> AudioBuffer, shared so both decks on one pack decode once
-const S = { decks: DECKS, packs: [], hits: [], seq: 0, synced: false, cache };
+// sync: null, or { follower: "R", leader: "L", m } where one follower bar = m leader bars
+const S = { decks: DECKS, packs: [], hits: [], seq: 0, synced: false, cache, sync: null, xfade: 50, ctx };
 window.VS = S;             // test hook
 const $ = id => document.getElementById(id);
 const say = t => { $("screen").textContent = t; };
-const rate = d => Math.pow(2, d.semis / 12);
+const rate = d => Math.pow(2, d.semis / 12) * d.fine;
+const other = d => DECKS[d.id === "L" ? "R" : "L"];
+const running = d => d.clock0 !== null && Object.keys(d.loops).length > 0;
+
+const mulKey = slug => "vs-mul:" + slug;
+function savedMul(slug) {
+  try { const m = Number(localStorage.getItem(mulKey(slug))); return [0.5, 2].includes(m) ? m : 1; }
+  catch (e) { return 1; }      // storage can be blocked (private window); the fix is just not remembered
+}
 
 async function loadPack(d, slug) {
   stopLoops(d);
-  d.pack = slug;
+  if (S.sync) syncOff();
+  d.pack = slug; d.fine = 1; d.mul = savedMul(slug);
   const meta = await (await fetch(`/packs/${encodeURIComponent(slug)}/analysis.json`, { cache: "no-store" })).json();
   const banks = {};
   for (const f of meta.files || []) {
@@ -126,11 +162,18 @@ async function loadPack(d, slug) {
 function buf(d, f) { return cache[d.pack + "/" + f]; }
 
 // Bar clock per deck, in real seconds; at a changed pitch the bar is shorter or longer
-function barSec(d) { return (d.meta ? d.meta.barlen : 2) / rate(d); }
+const nativeBar = d => d.meta ? SM.bar(d.meta, d.mul) : 2;
+function barSec(d) { return nativeBar(d) / rate(d); }
 function nextBar(d) {
   const now = ctx.currentTime + 0.02;
-  if (d.clock0 === null || Object.keys(d.loops).length === 0) { d.clock0 = now; return now; }
-  return d.clock0 + Math.ceil((now - d.clock0) / barSec(d) - 1e-6) * barSec(d);
+  if (!running(d)) {
+    // first loop on the deck. Synced with a running partner: start on the partner's next bar line,
+    // so this deck's grid sits on the partner's (follower bar = m leader bars, so the grids nest).
+    const p = other(d);
+    d.clock0 = S.sync && running(p) ? SM.lineAfter(p.clock0, barSec(p), now) : now;
+    return d.clock0;
+  }
+  return SM.lineAfter(d.clock0, barSec(d), now);
 }
 
 function flash(d, i) {
@@ -146,7 +189,7 @@ function hit(d, i, who = "you", via = "") {
   if (d.bank === "loops") toggleLoop(d, f);
   else {
     const src = ctx.createBufferSource();
-    src.buffer = buf(d, f); src.playbackRate.value = rate(d); src.connect(ctx.destination); src.start();
+    src.buffer = buf(d, f); src.playbackRate.value = rate(d); src.connect(d.volGain); src.start();
     d.view = { f, b: src.buffer, name: `${i + 1} · ${nm(f)}`, loop: false, at: ctx.currentTime, r: rate(d) };
   }
   pushState();
@@ -160,16 +203,18 @@ function toggleLoop(d, f) {
     // keep drawing it until it actually stops on the bar line
     if (d.view && d.view.loop && d.view.f === f) d.view.until = stopAt;
   } else {
-    const at = nextBar(d);
-    const src = ctx.createBufferSource();
-    src.buffer = buf(d, f); src.loop = true; src.playbackRate.value = rate(d); src.connect(ctx.destination);
-    // join in phase with the deck's loops already running (all 8 bars long)
-    const offset = (((at - d.clock0) * rate(d)) % src.buffer.duration + src.buffer.duration) % src.buffer.duration;
-    src.start(at, offset);
-    d.loops[f] = { src, at };
-    d.view = { f, b: src.buffer, name: nm(f), loop: true, at };
+    startLoop(d, f, nextBar(d));
+    d.view = { f, b: d.loops[f].src.buffer, name: nm(f), loop: true, at: d.loops[f].at };
   }
   renderDeck(d);
+}
+
+function startLoop(d, f, at) {
+  const src = ctx.createBufferSource();
+  src.buffer = buf(d, f); src.loop = true; src.playbackRate.value = rate(d); src.connect(d.volGain);
+  // join in phase with the deck's loops already running (all 8 bars long)
+  src.start(at, SM.loopPos(d.clock0, at, rate(d), src.buffer.duration));
+  d.loops[f] = { src, at };
 }
 
 function stopLoops(d) {
@@ -228,8 +273,8 @@ function drawDeck(d) {
   if (v.loop && !v.idle) {
     if (t >= v.at && d.clock0 !== null) {
       // same phase formula the loops start with, so the playhead matches what is heard
-      pos = (((t - d.clock0) * rate(d)) % dur + dur) % dur;
-      const bl = d.meta.barlen;
+      pos = SM.loopPos(d.clock0, t, rate(d), dur);
+      const bl = nativeBar(d);
       label += `  ·  bar ${Math.floor(pos / bl) + 1}/${Math.round(dur / bl)}`;
     } else label += "  ·  starts on the bar";
   } else if (!v.loop) {
@@ -257,14 +302,107 @@ function setBank(d, name) {
   d.bank = name; renderDeck(d); pushState();
 }
 
-function setPitch(d, semis) {
-  semis = Math.max(-12, Math.min(12, Math.round(semis)));
-  // keep running loops on their bar grid: re-anchor the clock so "bars elapsed" is unchanged
-  const now = ctx.currentTime;
-  if (d.clock0 !== null) d.clock0 = now - (now - d.clock0) * rate(d) / Math.pow(2, semis / 12);
-  d.semis = semis;
+// Every speed change goes through here. Running loops stay on their bar grid: the clock re-anchors
+// so "bars elapsed" is unchanged. A leader and its follower re-anchor by the same factor at the same
+// instant, so they stay aligned.
+function applyRate(d, semis, fine, now = ctx.currentTime) {
+  const r0 = rate(d);
+  d.semis = semis; d.fine = fine;
+  if (d.clock0 !== null) d.clock0 = SM.reanchor(d.clock0, now, r0, rate(d));
   for (const f in d.loops) d.loops[f].src.playbackRate.setValueAtTime(rate(d), now);
+}
+
+const follower = () => S.sync && DECKS[S.sync.follower];
+const leader = () => S.sync && DECKS[S.sync.leader];
+
+// After the leader's speed or ×2/÷2 changes: the follower re-solves its rate at the same instant.
+// The fold m is kept, so a pitch move never makes the follower jump to double or half time.
+function follow(now = ctx.currentTime) {
+  const F = follower(), L = leader();
+  if (!F) return;
+  applyRate(F, 0, SM.solve(nativeBar(F), barSec(L), S.sync.m), now);
+  renderDeck(F);
+}
+
+function setPitch(d, semis, fine = d.fine) {
+  semis = Math.max(-12, Math.min(12, Math.round(semis)));
+  // the following deck's own pitch keys let go of sync; the speed steps on from where it is
+  if (follower() === d) syncOff();
+  const now = ctx.currentTime;
+  applyRate(d, semis, fine, now);
+  if (leader() === d) follow(now);
   renderDeck(d); pushState();
+}
+const resetPitch = d => setPitch(d, 0, 1);
+
+function syncOff() {
+  S.sync = null;
+  for (const d of Object.values(DECKS)) if (d.meta) renderDeck(d);
+}
+
+// Deck F follows the other deck. Both playing: F's loops restart on the leader's next bar line, at the
+// bar of F's loop nearest to where F would have been, so the music doesn't jump far.
+function syncTo(F) {
+  const L = other(F);
+  if (!F.meta || !L.meta) { say("load a song on both decks first"); return; }
+  const now = ctx.currentTime;
+  const m = SM.fold(nativeBar(F), barSec(L));
+  const r1 = SM.solve(nativeBar(F), barSec(L), m);
+  S.sync = { follower: F.id, leader: L.id, m };
+  if (running(F) && running(L)) {
+    const at = SM.lineAfter(L.clock0, barSec(L), now + 0.05);
+    const files = Object.keys(F.loops);
+    const dur = F.loops[files[0]].src.buffer.duration;
+    const nb = nativeBar(F);
+    const b = SM.nearestBar(SM.loopPos(F.clock0, at, rate(F), dur), nb, Math.max(1, Math.round(dur / nb)));
+    F.semis = 0; F.fine = r1;
+    F.clock0 = at - b * nb / r1;
+    for (const f of files) { F.loops[f].src.stop(at); startLoop(F, f, at); }
+    if (F.view && F.view.loop && F.loops[F.view.f]) F.view.at = at;
+  } else applyRate(F, 0, r1, now);
+  say(`${F.id === "L" ? "LEFT" : "RIGHT"} follows ${L.id === "L" ? "LEFT" : "RIGHT"}` +
+      (m === 1 ? "" : m > 1 ? " at half time" : " at double time"));
+  renderDeck(F); renderDeck(L); pushState();
+}
+// the SYNC button: on the follower it lets go; on the leader (or with no sync) this deck follows the other
+function pressSync(d) {
+  if (follower() === d) { syncOff(); say("sync off"); pushState(); }
+  else syncTo(d);
+}
+
+function setMul(d, mul) {
+  d.mul = d.mul === mul ? 1 : mul;          // pressing the lit button again goes back to the detected tempo
+  try { localStorage.setItem(mulKey(d.pack), String(d.mul)); } catch (e) { /* not remembered, still applied */ }
+  if (S.sync) {
+    // ×2/÷2 relabels the bar; re-fold so the follower keeps the same speed on the new bar size
+    S.sync.m = SM.fold(nativeBar(follower()), barSec(leader()));
+    follow();
+  }
+  renderDeck(d); pushState();
+}
+
+// ---- mixer: deck volume and an equal-power crossfader (-3 dB each in the middle) ----
+function setVol(d, v) {
+  d.vol = Math.max(0, Math.min(100, Math.round(Number(v) || 0)));
+  d.volGain.gain.setTargetAtTime(d.vol / 100, ctx.currentTime, 0.01);
+  $(`vol-${d.id}`).value = d.vol; $(`vol-${d.id}-n`).textContent = d.vol;
+  pushState();
+}
+function setXfade(x) {
+  S.xfade = Math.max(0, Math.min(100, Math.round(Number(x) || 0)));
+  const a = S.xfade / 100 * Math.PI / 2;
+  // cos(pi/2) is 6e-17, not 0: pin the ends so full left really mutes the right deck
+  DECKS.L.xf = S.xfade === 100 ? 0 : Math.cos(a);
+  DECKS.R.xf = S.xfade === 0 ? 0 : Math.sin(a);
+  for (const d of Object.values(DECKS)) d.xfGain.gain.setTargetAtTime(d.xf, ctx.currentTime, 0.01);
+  $("xfade").value = S.xfade;
+  pushState();
+}
+for (const id of ["vol-L", "vol-R", "xfade"]) {
+  const el = $(id);
+  el.oninput = () => id === "xfade" ? setXfade(el.value) : setVol(DECKS[id.slice(-1)], el.value);
+  // hand the keys back to the pads once the slider is let go
+  el.onpointerup = el.onchange = () => el.blur();
 }
 
 function renderDeck(d) {
@@ -272,9 +410,10 @@ function renderDeck(d) {
   el.innerHTML = "";
   const h = document.createElement("h2");
   const title = document.createElement("span");
-  const bpm = d.meta ? (d.meta.bpm * rate(d)).toFixed(1) : "-";
+  // BPM from the loop grid (what sync locks to), not the detected meta.bpm: they differ on unsteady songs
+  const bpm = d.meta ? (240 / barSec(d)).toFixed(1) : "-";
   title.textContent = `${d.id === "L" ? "LEFT" : "RIGHT"} · ${bpm} BPM` +
-    (d.meta && d.meta.scale && d.meta.scale.scale && d.semis === 0 ? ` · ${d.meta.scale.root} ${d.meta.scale.scale}` : "");
+    (d.meta && d.meta.scale && d.meta.scale.scale && rate(d) === 1 ? ` · ${d.meta.scale.root} ${d.meta.scale.scale}` : "");
   const sel = document.createElement("select");
   for (const p of S.packs) { const o = document.createElement("option"); o.value = o.textContent = p; o.selected = p === d.pack; sel.append(o); }
   sel.onchange = () => { loadPack(d, sel.value); sel.blur(); };
@@ -293,11 +432,29 @@ function renderDeck(d) {
   const pitch = document.createElement("div"); pitch.className = "pitch";
   const dn = document.createElement("button"); dn.textContent = "▼"; dn.onclick = () => setPitch(d, d.semis - 1);
   const val = document.createElement("span"); val.className = "val";
-  val.textContent = `${d.semis > 0 ? "+" : ""}${d.semis} st · ${Math.round(rate(d) * 100)}%`;
-  val.title = "click to reset"; val.style.cursor = "pointer"; val.onclick = () => setPitch(d, 0);
+  const pct = (rate(d) - 1) * 100;
+  val.textContent = `${d.semis > 0 ? "+" : ""}${d.semis} st · ${pct >= 0.05 ? "+" : pct <= -0.05 ? "−" : ""}${Math.abs(pct).toFixed(1)}%`;
+  val.title = "click to reset"; val.style.cursor = "pointer"; val.onclick = () => resetPitch(d);
   const up = document.createElement("button"); up.textContent = "▲"; up.onclick = () => setPitch(d, d.semis + 1);
   pitch.append(dn, val, up);
   row.append(pitch);
+
+  const row2 = document.createElement("div"); row2.className = "row";
+  const sync = document.createElement("button");
+  const isF = follower() === d, m = isF ? S.sync.m : 1;
+  sync.className = "sync" + (isF ? " on" : "");
+  sync.innerHTML = `<span class="fk">${d.id === "L" ? "5" : "6"}</span>`;
+  sync.append(isF ? `SYNC${m > 1 ? " ½" : m < 1 ? " ×2" : ""}` : leader() === d ? "SYNC (leading)" : "SYNC");
+  sync.title = "follow the other deck's tempo and bar lines";
+  sync.onclick = () => pressSync(d);
+  row2.append(sync);
+  for (const [mul, label] of [[2, "×2"], [0.5, "÷2"]]) {
+    const b = document.createElement("button");
+    b.textContent = label; b.className = d.mul === mul ? "on" : "";
+    b.title = label === "×2" ? "the tempo was read at half speed" : "the tempo was read at double speed";
+    b.onclick = () => setMul(d, mul);
+    row2.append(b);
+  }
 
   const grid = document.createElement("div"); grid.className = "grid";
   const files = d.banks[d.bank] || [];
@@ -312,7 +469,7 @@ function renderDeck(d) {
     grid.append(p);
   }
   const cv = document.createElement("canvas"); cv.className = "wave"; d.canvas = cv;
-  el.append(h, row, cv, grid);
+  el.append(h, row, row2, cv, grid);
 }
 
 let stateTimer = null;
@@ -320,8 +477,10 @@ function pushState() {
   clearTimeout(stateTimer);
   stateTimer = setTimeout(() => fetch("/state", { method: "POST", headers: { "Content-Type": "application/json", "X-VS": "1" },
     body: JSON.stringify({ audio: ctx.state, loaded: Object.keys(cache).length, hits: S.hits.slice(-10),
+      sync: S.sync, xfade: S.xfade,
       decks: Object.fromEntries(Object.values(DECKS).map(d => [d.id, { pack: d.pack, bank: d.bank, semis: d.semis,
-                                                                         loops: Object.keys(d.loops) }])) }) }).catch(() => {}), 50);
+        fine: +d.fine.toFixed(5), mul: d.mul, bpm: d.meta ? +(240 / barSec(d)).toFixed(2) : null, vol: d.vol,
+        loops: Object.keys(d.loops) }])) }) }).catch(() => {}), 50);
 }
 
 // The AI agent's commands (vs.py) arrive through the local server's queue
@@ -332,10 +491,22 @@ async function poll() {
     if (!S.synced) { S.seq = r.seq; S.synced = true; }
     else for (const c of r.cmds) {
       S.seq = Math.max(S.seq, c.seq);
+      if (c.cmd === "sync") {
+        // unlike the button, "sync R" never toggles off: it (re)locks R to the other deck
+        if (DECKS[c.deck]) syncTo(DECKS[c.deck]);
+        else { syncOff(); say("AI: sync off"); pushState(); }
+        continue;
+      }
+      if (c.cmd === "xfade") { setXfade(c.value); say(`AI: crossfader ${S.xfade}`); continue; }
       const d = DECKS[c.deck] || DECKS.L;
       if (c.cmd === "bank") { setBank(d, String(c.name)); say(`AI: ${d.id} bank ${c.name}`); }
       else if (c.cmd === "pad") hit(d, Number(c.pad) - 1, "ai");
-      else if (c.cmd === "pitch") { setPitch(d, Number(c.semis)); say(`AI: ${d.id} pitch ${d.semis}`); }
+      else if (c.cmd === "pitch") { setPitch(d, Number(c.semis) || 0); say(`AI: ${d.id} pitch ${d.semis}`); }
+      else if (c.cmd === "vol") { setVol(d, c.value); say(`AI: ${d.id} volume ${d.vol}`); }
+      else if (c.cmd === "bpmx" && [0.5, 1, 2].includes(c.mul) && d.meta) {
+        if (d.mul !== c.mul) setMul(d, c.mul === 1 ? d.mul : c.mul);
+        say(`AI: ${d.id} tempo ${240 / barSec(d) | 0} BPM`);
+      }
       else if (c.cmd === "load") {
         say(`AI: ${d.id} loading ${c.pack}`);
         if (!S.packs.includes(c.pack)) await refreshPacks();     // a pack the AI just made
@@ -364,8 +535,10 @@ document.addEventListener("keydown", e => {
     if (i >= 0) { e.preventDefault(); hit(d, i, "you", "key"); return; }
     if (k === d.up) return setPitch(d, d.semis + 1);
     if (k === d.down) return setPitch(d, d.semis - 1);
-    if (k === d.reset) return setPitch(d, 0);
+    if (k === d.reset) return resetPitch(d);
   }
+  if (k === "5") return pressSync(DECKS.L);
+  if (k === "6") return pressSync(DECKS.R);
 });
 
 // MIDI pads (e.g. the MK2 in MIDI mode): note 36 = left pad 1, 52 = right pad 1. Untested on the real hardware.

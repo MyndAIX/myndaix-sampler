@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import warnings
 import time
 from pathlib import Path
 
@@ -525,6 +526,24 @@ def cut(data, sr, t0, t1, ms=2):
     return fade(data[a:b].copy(), sr, ms)
 
 
+def conform(x, sr, n, ms=2):
+    """-> (x as exactly n samples, % it was stretched). Loops are cut between tracked bar lines, which
+    wobble on songs that drift or confuse the beat tracker (Benga's loops came out 13.1-13.7 s), and
+    a loop that is 4% short drifts half a bar every 8 bars against the other loops. The sampler's
+    sync assumes every loop is exactly 8 grid bars, so the cut is stretched to that length, keeping
+    its pitch. Under 0.05% off, trimming or padding is inaudible and skips the stretch."""
+    m = len(x)
+    pct = (n / m - 1) * 100 if m else 0.0
+    if m and abs(pct) > 0.05:
+        # time_stretch works along the last axis; rate > 1 shortens
+        with warnings.catch_warnings():
+            # librosa 1.0 warns about arguments its own time_stretch passes to phase_vocoder
+            warnings.simplefilter("ignore", FutureWarning)
+            x = librosa.effects.time_stretch(np.ascontiguousarray(x.T), rate=m / n).T
+    x = x[:n] if len(x) >= n else np.concatenate([x, np.zeros((n - len(x), x.shape[1]), x.dtype)])
+    return fade(np.ascontiguousarray(x, dtype=np.float64), sr, ms), round(float(pct), 2)
+
+
 def best_window(target, lv, nb, anchor, w, L=8):
     norm = {s: lv[s] / (np.percentile(lv[s], 95) + 1e-9) for s in lv}
     others = [s for s in norm if s != target and np.percentile(lv[s], 95) > 0.01]
@@ -599,18 +618,20 @@ def main():
     p95 = {s: float(np.percentile(lv[s], 95)) for s in STEMS}
     loudest = max(p95.values())
     loops, n = {}, 0
+    loop_n = int(round(8 * barlen * fsr))     # every loop is exactly this long (see conform)
     for s in STEMS:
         if p95[s] < 0.01:      # stem is basically empty (about -40 dBFS)
             continue
         i = best_window(s, lv, nb, anchor, weights[s])
         n += 1
         name = f"{n} {LABEL[s].replace('/', '-')} 8bar.wav"
-        sf.write(str(tmp / "loops" / name), cut(full[s][0], fsr, bars[i], bars[i + 8]), fsr, subtype=subtype)
+        lp, st = conform(full[s][0][int(round(bars[i] * fsr)):int(round(bars[i + 8] * fsr))], fsr, loop_n)
+        sf.write(str(tmp / "loops" / name), lp, fsr, subtype=subtype)
         rel = 20 * np.log10(p95[s] / loudest)
         # same 10 dB line sections() uses for "main" stems; quieter stems are usually demucs bleed
         loops[s] = dict(file=name, bar=i + 1, start=round(float(bars[i]), 3),
                         seconds=round(float(bars[i + 8] - bars[i]), 3), rel_db=round(float(rel), 1),
-                        faint=bool(rel <= -10))
+                        faint=bool(rel <= -10), stretch_pct=st)
     # the classic sample: 8 bars of the full mix from the loudest hook-guess section
     hook_segs = [s for s in segs if s["guess"] == "hook?"] or sorted(segs, key=lambda s: -s["en"])[:1]
     hs = hook_segs[0]
@@ -621,10 +642,11 @@ def main():
     md = msr = None
     if mixwav:
         md, msr = sf.read(str(mixwav), always_2d=True)
-        sf.write(str(tmp / "loops" / "0 full mix 8bar.wav"), cut(md, msr, bars[mi], bars[mi + 8]), msr,
-                 subtype=sf.info(str(mixwav)).subtype)
+        lp, st = conform(md[int(round(bars[mi] * msr)):int(round(bars[mi + 8] * msr))], msr,
+                         int(round(8 * barlen * msr)))
+        sf.write(str(tmp / "loops" / "0 full mix 8bar.wav"), lp, msr, subtype=sf.info(str(mixwav)).subtype)
         loops["mix"] = dict(file="0 full mix 8bar.wav", bar=mi + 1, start=round(float(bars[mi]), 3),
-                            seconds=round(float(bars[mi + 8] - bars[mi]), 3))
+                            seconds=round(float(bars[mi + 8] - bars[mi]), 3), stretch_pct=st)
 
     log("cutting chops")
     beat = barlen / 4
@@ -687,13 +709,15 @@ def main():
     for s, v in loops.items():
         note = (f"faint ({v['rel_db']:.0f} dB under the loudest part): probably bleed, check by ear"
                 if v.get("faint") else "")
+        if abs(v.get("stretch_pct", 0)) > 0.05:
+            note = (note + "; " if note else "") + f"stretched {v['stretch_pct']:+.1f}% to exactly 8 bars"
         lines.append(f"| `loops/{v['file']}` | {v['bar']} | {fmt(v['start'])} | {note} |")
     lines += ["", "## Chop sets", ""] + [f"- `chops/{k}/`: {v}" for k, v in chops.items()]
     if vrows:
         lines += ["", "| vocal chop | at | length | bar |", "|---|---|---|---|"]
         lines += [f"| {k:02d} | {fmt(a)} | {d} s | {bn} |" for k, a, d, bn in vrows]
     lines += ["", "## Into Maschine", "",
-              f"- Set the tempo to **{bpm:.2f}**.",
+              f"- Set the tempo to **{240 / barlen:.2f}** (every loop is exactly 8 bars at this tempo).",
               *([f"- For melodies or bass you play yourself: Keyboard mode, root {sc['root']}, scale {sc['scale']}."]
                 if sc and sc["scale"] else []),
               "- Loops go on one group, one loop per pad. Use a single 8-bar pattern with a note on step 1 for each pad.",
@@ -718,7 +742,7 @@ def main():
           ["", f"Total: {bar_no - 1} bars = {fmt(t)}.", "",
            "Starter ideas only. The section map in PACK.md shows how the original song is built."]
     (tmp / "ARRANGE.md").write_text("\n".join(arr))
-    meta = dict(slug=slug, bpm=round(bpm, 3), steady=steady, resid_ms=round(resid, 1), key=key,
+    meta = dict(slug=slug, bpm=round(bpm, 3), loop_seconds=loop_n / fsr, steady=steady, resid_ms=round(resid, 1), key=key,
                 key_fit=round(kc, 3), scale=sc, barlen=round(barlen, 5), first_drum_bar_s=round(first_drum_bar, 4),
                 first_drum_bar=anchor + 1, nbars=nb, bars_s=[round(float(b), 4) for b in bars],
                 downbeat_score={int(k): round(float(v), 4) for k, v in pscore.items()},
