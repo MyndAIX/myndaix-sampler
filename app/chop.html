@@ -131,7 +131,7 @@ async function openPack(slug) {
 async function openStem(stem) {
   stop();
   const gen = ++E.gen, slug = E.slug;
-  Object.assign(E, { stem: null, buf: null, sel: null, want: stem }); updateSel(); renderStems(); draw();
+  Object.assign(E, { stem: null, buf: null, sel: null, want: stem }); updateSel(); renderStems();   // the rAF loop in draw() repaints the empty wave
   say(`loading the ${STEM_LABEL[stem] || stem} stem (whole song)…`);
   let b;
   try {
