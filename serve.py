@@ -30,6 +30,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -59,6 +60,11 @@ URL_RE = re.compile(r"^https://[^\s\"'`$\\<>|;(){}]{1,500}$")
 STATUSES = {"working", "done", "failed"}
 
 AUTOCHOP = os.environ.get("SAMPLER_AUTOCHOP", "1") != "0"
+# a chop that runs longer than this is stopped (a download that trickles forever would otherwise hold
+# the one worker, and every song after it, indefinitely). A normal song takes a few minutes; the
+# first run also downloads the stem splitter's model.
+_t = os.environ.get("SAMPLER_CHOP_TIMEOUT", "")
+CHOP_TIMEOUT = int(_t) if _t.isdigit() and int(_t) > 0 else 1800
 
 lock = threading.Lock()
 wake = threading.Event()   # set when a request is added: the chop worker looks at once
@@ -93,25 +99,58 @@ def add_request(kind, src, deck):
 def chop_worker(port):
     """Runs waiting requests one at a time, oldest first, through `vs.py run <id>`: the same path an
     agent uses, so the link check, the progress posts and the deck load are one piece of code. One at
-    a time on purpose: two stem splits at once would only slow both down. vs.py marks the request
-    working itself (it refuses one already marked), so the worker never claims it first."""
-    env = dict(os.environ, VS_URL=f"http://127.0.0.1:{port}", SAMPLER_HOME=str(HOME))
+    a time on purpose: two stem splits at once would only slow both down.
+    The claim is the server's: POST /requests/<id> {status: working} succeeds only for a waiting or
+    failed request, so if an agent runs the same id at the same moment, one of them gets 409 and stops.
+    The claim carries a runner token, so when the child exits the worker finishes off only a request
+    that is still working under ITS token (a child killed after claiming must not leave it stuck)."""
     while True:
         wake.wait(5)
         wake.clear()
         while True:
-            with lock:
-                nxt = next((r for r in requests if r["status"] == "waiting"), None)
-            if nxt is None:
+            try:
+                with lock:
+                    nxt = next((r for r in requests if r["status"] == "waiting"), None)
+                if nxt is None:
+                    break
+                run_one(nxt, port)
+            except Exception as e:           # a full or unplugged drive: log it, keep the worker alive
+                print(f"[{time.strftime('%H:%M:%S')}] chop worker: {e!r}", flush=True)
+                time.sleep(5)
                 break
-            print(f"[{time.strftime('%H:%M:%S')}] chop worker: song #{nxt['id']}", flush=True)
-            subprocess.run([sys.executable, "-I", str(REPO / "vs.py"), "run", str(nxt["id"])],
-                           env=env, stdin=subprocess.DEVNULL)
-            with lock:          # vs.py died before posting anything: don't pick it again forever
-                if nxt["status"] == "waiting":
-                    nxt["status"], nxt["note"] = "failed", "the chopper did not start"
-                    save_requests()
-            print(f"[{time.strftime('%H:%M:%S')}] chop worker: song #{nxt['id']} {nxt['status']}", flush=True)
+
+
+def run_one(r, port):
+    token = "worker-" + secrets.token_hex(6)
+    env = dict(os.environ, VS_URL=f"http://127.0.0.1:{port}", SAMPLER_HOME=str(HOME), VS_RUNNER=token)
+    print(f"[{time.strftime('%H:%M:%S')}] chop worker: song #{r['id']}", flush=True)
+    # its own process group, so a timeout stops the whole tree (flip.sh, yt-dlp, ffmpeg, demucs)
+    proc = subprocess.Popen([sys.executable, "-I", str(REPO / "vs.py"), "run", str(r["id"])],
+                            env=env, stdin=subprocess.DEVNULL, start_new_session=True)
+    why = "the chopper stopped before finishing"
+    try:
+        proc.wait(timeout=CHOP_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        why = f"stopped after {CHOP_TIMEOUT // 60} min" if CHOP_TIMEOUT >= 60 else f"stopped after {CHOP_TIMEOUT} s"
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(proc.pid, sig)
+            except ProcessLookupError:
+                break
+            try:
+                proc.wait(timeout=10)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    with lock:
+        if r["status"] == "waiting":                       # vs.py died before claiming it
+            r["status"], r["note"] = "failed", "the chopper did not start"
+        elif r["status"] == "working" and r.get("runner") == token:
+            r["status"], r["note"] = "failed", why
+        else:
+            return print(f"[{time.strftime('%H:%M:%S')}] chop worker: song #{r['id']} {r['status']}", flush=True)
+        save_requests()
+    print(f"[{time.strftime('%H:%M:%S')}] chop worker: song #{r['id']} failed ({r['note']})", flush=True)
 
 
 def safe_name(name):
@@ -625,6 +664,12 @@ class Handler(SimpleHTTPRequestHandler):
                     return self.send_json({"error": "no such request"}, 404)
                 if obj.get("status") not in STATUSES:
                     return self.send_json({"error": f"status must be one of {sorted(STATUSES)}"}, 400)
+                # the claim: only a waiting (or failed, for a retry) request can start, so two runners
+                # of one id can't both chop it; the loser gets 409 and stops
+                if obj["status"] == "working":
+                    if req["status"] not in ("waiting", "failed"):
+                        return self.send_json({"error": f"request {req['id']} is already {req['status']}", "busy": True}, 409)
+                    req["runner"] = str(obj.get("runner", ""))[:64]
                 req["status"] = obj["status"]
                 req["note"] = str(obj.get("note", ""))[:300]
                 pack = obj.get("pack")

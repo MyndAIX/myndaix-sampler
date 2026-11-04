@@ -112,7 +112,15 @@ def run(rid):
         if p.parent != inbox or not p.is_file():
             return fail(rid, "file not found in the inbox")
         src = str(p)
-    call("POST", f"/requests/{rid}", {"status": "working", "note": "chopping (a few minutes)"})
+    # the server's claim is the real check: two runners of one id can both pass the check above
+    try:
+        call("POST", f"/requests/{rid}", {"status": "working", "note": "chopping (a few minutes)",
+                                          "runner": os.environ.get("VS_RUNNER") or f"agent-{os.getpid()}"})
+    except urllib.error.HTTPError as e:
+        if e.code == 409:
+            print(f"request {rid} is already being chopped", file=sys.stderr)
+            return 2
+        raise
     call("POST", "/control", {"cmd": "say", "text": f"chopping song #{rid}, this takes a few minutes"})
     proc = subprocess.Popen([str(REPO / "flip.sh"), src], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     lines = []

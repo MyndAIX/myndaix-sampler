@@ -343,6 +343,13 @@ a2 = json.loads(req("/requests", "POST", json.dumps({**u, "deck": "L"}).encode()
 a3 = json.loads(req("/requests", "POST", json.dumps({**u, "deck": "R"}).encode(), H)[1])["request"]["id"]
 check("the same link twice for one deck is one request; the other deck gets its own", a1 == a2 and a3 != a1)
 check("/requests says the chop worker is off here", json.loads(req("/requests")[1])["auto"] is False)
+# the claim: two runners of one id, only the first starts it
+c1, _ = req(f"/requests/{a3}", "POST", json.dumps({"status": "working", "runner": "a"}).encode(), H)
+c2, b2 = req(f"/requests/{a3}", "POST", json.dumps({"status": "working", "runner": "b"}).encode(), H)
+check("a request can be claimed (working) once: the second runner gets 409", c1 == 200 and c2 == 409 and json.loads(b2).get("busy"))
+out = subprocess.run([sys.executable, "-I", f"{here}/vs.py", "run", str(a3)], capture_output=True, text=True, env=env)
+check("... and vs.py run on it stops without touching it", out.returncode == 2
+      and next(r for r in json.loads(req("/requests")[1])["requests"] if r["id"] == a3)["status"] == "working")
 sys.exit(bad)
 PY
 
@@ -352,14 +359,25 @@ PY
 A="$LIB/auto"; mkdir -p "$A"
 echo '[{"id": 1, "kind": "link", "src": "https://www.youtube.com/watch?v=old", "deck": "L", "status": "working", "note": "", "pack": null, "t": 1}]' > "$A/requests.json"
 APORT=8767
-VS_VENV="$LIB/no-venv" SAMPLER_HOME="$A" python3 -I "$HERE/serve.py" "$APORT" > "$LIB/auto.log" 2>&1 &
+# a stand-in chopper: a link with "fast" fails at once with its own error, any other link hangs
+# (and records its pid, so the test can check the timeout stopped it)
+mkdir -p "$LIB/fakevenv/bin"
+cat > "$LIB/fakevenv/bin/python" <<'SH'
+#!/bin/bash
+case "$*" in
+  *fast*) echo "chopper error: boom"; exit 1 ;;
+  *) echo $$ > "$(dirname "$0")/../hung.pid"; exec sleep 60 ;;
+esac
+SH
+chmod +x "$LIB/fakevenv/bin/python"
+VS_VENV="$LIB/fakevenv" SAMPLER_CHOP_TIMEOUT=2 SAMPLER_HOME="$A" python3 -I "$HERE/serve.py" "$APORT" > "$LIB/auto.log" 2>&1 &
 apid=$!
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   if python3 -I -c "import urllib.request,sys; urllib.request.urlopen(sys.argv[1], timeout=1)" "http://127.0.0.1:$APORT/" > /dev/null 2>&1; then break; fi
   sleep 0.2
 done
-python3 -I - "$APORT" <<'PY' || { kill "$apid"; exit 1; }
-import json, sys, time, urllib.request
+python3 -I - "$APORT" "$LIB/fakevenv/hung.pid" <<'PY' || { kill "$apid"; exit 1; }
+import json, os, sys, time, urllib.request
 B = f"http://127.0.0.1:{sys.argv[1]}"
 bad = 0
 def check(name, cond):
@@ -372,18 +390,33 @@ j = reqs()
 check("worker on: /requests says so", j["auto"] is True)
 check("a request left working by a dead server is marked interrupted, not re-run",
       j["requests"][0]["status"] == "failed" and "interrupted" in j["requests"][0]["note"])
-r = urllib.request.Request(B + "/requests", method="POST", data=json.dumps({"url": "https://www.youtube.com/watch?v=new", "deck": "R"}).encode(),
-                           headers={"Content-Type": "application/json", "X-VS": "1"})
-with urllib.request.urlopen(r, timeout=3) as x:
-    rid = json.loads(x.read())["request"]["id"]
-end = time.time() + 20
-while time.time() < end:
-    st = next(q for q in reqs()["requests"] if q["id"] == rid)
-    if st["status"] == "failed":
-        break
-    time.sleep(0.25)
-check("an added song is picked up with no agent: the worker ran vs.py, which posted the chopper's error",
-      st["status"] == "failed" and "Python environment" in st["note"])
+def add(url):
+    r = urllib.request.Request(B + "/requests", method="POST", data=json.dumps({"url": url, "deck": "R"}).encode(),
+                               headers={"Content-Type": "application/json", "X-VS": "1"})
+    with urllib.request.urlopen(r, timeout=3) as x:
+        return json.loads(x.read())["request"]["id"]
+def settle(rid, secs=25):
+    end = time.time() + secs
+    while time.time() < end:
+        st = next(q for q in reqs()["requests"] if q["id"] == rid)
+        if st["status"] in ("failed", "done"):
+            return st
+        time.sleep(0.25)
+    return st
+slow, fast = add("https://www.youtube.com/watch?v=slow"), add("https://www.youtube.com/watch?v=fast")
+st = settle(slow)
+check("a chop that hangs is stopped at the deadline and marked failed (not left working)",
+      st["status"] == "failed" and "stopped after 2 s" in st["note"])
+pid = int(open(sys.argv[2]).read())
+time.sleep(0.3)
+try:
+    os.kill(pid, 0); alive = True
+except ProcessLookupError:
+    alive = False
+check("... and the hung chopper process itself is gone", not alive)
+st = settle(fast)
+check("the queue moves on: the next song is picked up with no agent, its chopper's error is the note",
+      st["status"] == "failed" and "boom" in st["note"])
 sys.exit(bad)
 PY
 kill "$apid"
