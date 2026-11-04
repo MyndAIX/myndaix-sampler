@@ -6,8 +6,9 @@
   /api/packs       packs that have an analysis.json
   /control         command queue: an AI agent POSTs commands (vs.py), the app polls them (GET ?after=<seq>)
   /state           the app POSTs what it is doing; the agent GETs it
-  /requests        songs the player asked for (a link or a dropped file); the agent chops them (vs.py run)
-  /requests/<id>   the agent POSTs progress: working, done (with the pack), failed
+  /requests        songs the player asked for (a link or a dropped file). The server's chop worker runs
+                   them one at a time (vs.py run <id>); SAMPLER_AUTOCHOP=0 leaves them for an agent
+  /requests/<id>   vs.py run POSTs progress: working, done (with the pack), failed
   /upload          the app POSTs a dropped audio file (?name=&deck=); it lands in $SAMPLER_HOME/inbox/
   /stems/<slug>/<stem>.wav   a whole stem (or mix), read-only, for the chop editor
   /api/mine/<slug>           the player's own bank for a pack: owner, rev, pads, which stems can be cut
@@ -29,6 +30,8 @@ import os
 import re
 import secrets
 import shutil
+import signal
+import subprocess
 import sys
 import threading
 import time
@@ -56,7 +59,15 @@ AUDIO_EXT = {".wav", ".mp3", ".m4a", ".flac", ".aif", ".aiff", ".ogg"}
 URL_RE = re.compile(r"^https://[^\s\"'`$\\<>|;(){}]{1,500}$")
 STATUSES = {"working", "done", "failed"}
 
+AUTOCHOP = os.environ.get("SAMPLER_AUTOCHOP", "1") != "0"
+# a chop that runs longer than this is stopped (a download that trickles forever would otherwise hold
+# the one worker, and every song after it, indefinitely). A normal song takes a few minutes; the
+# first run also downloads the stem splitter's model.
+_t = os.environ.get("SAMPLER_CHOP_TIMEOUT", "")
+CHOP_TIMEOUT = int(_t) if _t.isdigit() and int(_t) > 0 else 1800
+
 lock = threading.Lock()
+wake = threading.Event()   # set when a request is added: the chop worker looks at once
 queue = []          # [(seq, cmd dict)], newest last, capped
 seq = 0
 state = {}
@@ -70,12 +81,90 @@ def save_requests():
 
 
 def add_request(kind, src, deck):
+    deck = deck if deck in ("L", "R") else "L"
+    # the same song for the same deck already queued or chopping: that request, not a second one
+    # (pressing add again while nothing seemed to happen used to queue it four times)
+    for r in requests:
+        if r["kind"] == kind and r["src"] == src and r["deck"] == deck and r["status"] in ("waiting", "working"):
+            return r
     req = {"id": (requests[-1]["id"] + 1) if requests else 1, "kind": kind, "src": src,
-           "deck": deck if deck in ("L", "R") else "L", "status": "waiting", "note": "", "pack": None,
+           "deck": deck, "status": "waiting", "note": "", "pack": None,
            "t": int(time.time())}
     requests.append(req)
     save_requests()
+    wake.set()
     return req
+
+
+def chop_worker(port):
+    """Runs waiting requests one at a time, oldest first, through `vs.py run <id>`: the same path an
+    agent uses, so the link check, the progress posts and the deck load are one piece of code. One at
+    a time on purpose: two stem splits at once would only slow both down.
+    The claim is the server's: POST /requests/<id> {status: working} succeeds only for a waiting or
+    failed request, so if an agent runs the same id at the same moment, one of them gets 409 and stops.
+    The claim carries a runner token, so when the child exits the worker finishes off only a request
+    that is still working under ITS token (a child killed after claiming must not leave it stuck)."""
+    while True:
+        wake.wait(5)
+        wake.clear()
+        while True:
+            try:
+                with lock:
+                    nxt = next((r for r in requests if r["status"] == "waiting"), None)
+                if nxt is None:
+                    break
+                run_one(nxt, port)
+            except Exception as e:           # a full or unplugged drive: log it, keep the worker alive
+                print(f"[{time.strftime('%H:%M:%S')}] chop worker: {e!r}", flush=True)
+                time.sleep(5)
+                break
+
+
+def stop_group(proc):
+    """SIGTERM the chop's whole process group, give it 10 s, then SIGKILL whatever is left. Waits on
+    the GROUP, not just vs.py: a downloader that ignores SIGTERM outlives its parent, and the queue
+    must not move on while it still runs."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    end = time.time() + 10
+    while time.time() < end:
+        proc.poll()                          # reap vs.py, so a dead parent doesn't count as alive
+        try:
+            os.killpg(proc.pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.2)
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait()
+
+
+def run_one(r, port):
+    token = "worker-" + secrets.token_hex(6)
+    env = dict(os.environ, VS_URL=f"http://127.0.0.1:{port}", SAMPLER_HOME=str(HOME), VS_RUNNER=token)
+    print(f"[{time.strftime('%H:%M:%S')}] chop worker: song #{r['id']}", flush=True)
+    # its own process group, so a timeout stops the whole tree (flip.sh, yt-dlp, ffmpeg, demucs)
+    proc = subprocess.Popen([sys.executable, "-I", str(REPO / "vs.py"), "run", str(r["id"])],
+                            env=env, stdin=subprocess.DEVNULL, start_new_session=True)
+    why = "the chopper stopped before finishing"
+    try:
+        proc.wait(timeout=CHOP_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        why = f"stopped after {CHOP_TIMEOUT // 60} min" if CHOP_TIMEOUT >= 60 else f"stopped after {CHOP_TIMEOUT} s"
+        stop_group(proc)
+    with lock:
+        if r["status"] == "waiting":                       # vs.py died before claiming it
+            r["status"], r["note"] = "failed", "the chopper did not start"
+        elif r["status"] == "working" and r.get("runner") == token:
+            r["status"], r["note"] = "failed", why
+        else:
+            return print(f"[{time.strftime('%H:%M:%S')}] chop worker: song #{r['id']} {r['status']}", flush=True)
+        save_requests()
+    print(f"[{time.strftime('%H:%M:%S')}] chop worker: song #{r['id']} failed ({r['note']})", flush=True)
 
 
 def safe_name(name):
@@ -471,7 +560,7 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json(state)
         if u.path == "/requests":
             with lock:
-                return self.send_json({"requests": requests})
+                return self.send_json({"requests": requests, "auto": AUTOCHOP})
         if self.mine_routes(unquote(u.path)):
             return
         return super().do_GET()
@@ -589,6 +678,12 @@ class Handler(SimpleHTTPRequestHandler):
                     return self.send_json({"error": "no such request"}, 404)
                 if obj.get("status") not in STATUSES:
                     return self.send_json({"error": f"status must be one of {sorted(STATUSES)}"}, 400)
+                # the claim: only a waiting (or failed, for a retry) request can start, so two runners
+                # of one id can't both chop it; the loser gets 409 and stops
+                if obj["status"] == "working":
+                    if req["status"] not in ("waiting", "failed"):
+                        return self.send_json({"error": f"request {req['id']} is already {req['status']}", "busy": True}, 409)
+                    req["runner"] = str(obj.get("runner", ""))[:64]
                 req["status"] = obj["status"]
                 req["note"] = str(obj.get("note", ""))[:300]
                 pack = obj.get("pack")
@@ -615,7 +710,14 @@ if __name__ == "__main__":
             requests = json.loads(REQ_FILE.read_text())
         except ValueError:
             REQ_FILE.rename(REQ_FILE.with_suffix(f".bad-{int(time.time())}"))
+    # a request still "working" at start-up lost its chopper with the last server: say so, rather
+    # than leave it spinning forever (it is not re-run by itself, it may be an old one)
+    for r in requests:
+        if r.get("status") == "working":
+            r["status"], r["note"] = "failed", "interrupted (the server restarted): add it again"
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"sampler: http://127.0.0.1:{port}/", flush=True)
+    if AUTOCHOP:
+        threading.Thread(target=chop_worker, args=(port,), daemon=True).start()
     srv.serve_forever()

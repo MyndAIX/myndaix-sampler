@@ -22,7 +22,7 @@ Open your AI assistant in this folder and say: **"set up the sampler and start i
 In the sampler, paste a YouTube link (or drop a song file on a deck) and click **Add song**. Then
 tell your AI: **"chop my song."** A few minutes later the pads play it.
 
-No AI? Do it by hand: `./setup.sh` once, `./run.sh` to start, and `./vs.py run 1` to chop request #1.
+No AI? Do it by hand: `./setup.sh` once, then `./run.sh` to start. Songs you add (a link or a dropped file) are chopped by the sampler itself, one at a time, and land on the deck you picked.
 
 ## Play
 
