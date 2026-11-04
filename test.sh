@@ -46,7 +46,8 @@ fmt = struct.pack("<HHIIHH", 3, 2, 44100, 44100 * 8, 8, 32)
                                + b"fmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(data)) + data)
 PY
 
-SAMPLER_HOME="$LIB" python3 -I "$HERE/serve.py" "$PORT" > /dev/null 2>&1 &
+# the chop worker is off here: these checks drive requests by hand (it gets its own server below)
+SAMPLER_AUTOCHOP=0 SAMPLER_HOME="$LIB" python3 -I "$HERE/serve.py" "$PORT" > /dev/null 2>&1 &
 pid=$!
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   if python3 -I -c "import urllib.request,sys; urllib.request.urlopen(sys.argv[1], timeout=1)" "http://127.0.0.1:$PORT/" > /dev/null 2>&1; then break; fi
@@ -334,8 +335,58 @@ out = subprocess.run([sys.executable, "-I", f"{here}/vs.py", "run", rid], captur
                      env={**env, "VS_VENV": str(lib / "no-venv")})
 st = next(r for r in json.loads(req("/requests")[1])["requests"] if str(r["id"]) == rid)
 check("vs.py run: a failing chopper marks the request failed", out.returncode == 1 and st["status"] == "failed")
+
+# pressing add again for a song already queued for that deck gives back that request
+u = {"url": "https://www.youtube.com/watch?v=dup"}
+a1 = json.loads(req("/requests", "POST", json.dumps({**u, "deck": "L"}).encode(), H)[1])["request"]["id"]
+a2 = json.loads(req("/requests", "POST", json.dumps({**u, "deck": "L"}).encode(), H)[1])["request"]["id"]
+a3 = json.loads(req("/requests", "POST", json.dumps({**u, "deck": "R"}).encode(), H)[1])["request"]["id"]
+check("the same link twice for one deck is one request; the other deck gets its own", a1 == a2 and a3 != a1)
+check("/requests says the chop worker is off here", json.loads(req("/requests")[1])["auto"] is False)
 sys.exit(bad)
 PY
+
+# the chop worker: a fresh library whose last server died mid-chop, then a song added with no agent
+# around. No venv (VS_VENV points nowhere), so the chop fails fast, but it must be the worker that
+# ran it, through vs.py (which posts the chopper's own error as the note).
+A="$LIB/auto"; mkdir -p "$A"
+echo '[{"id": 1, "kind": "link", "src": "https://www.youtube.com/watch?v=old", "deck": "L", "status": "working", "note": "", "pack": null, "t": 1}]' > "$A/requests.json"
+APORT=8767
+VS_VENV="$LIB/no-venv" SAMPLER_HOME="$A" python3 -I "$HERE/serve.py" "$APORT" > "$LIB/auto.log" 2>&1 &
+apid=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if python3 -I -c "import urllib.request,sys; urllib.request.urlopen(sys.argv[1], timeout=1)" "http://127.0.0.1:$APORT/" > /dev/null 2>&1; then break; fi
+  sleep 0.2
+done
+python3 -I - "$APORT" <<'PY' || { kill "$apid"; exit 1; }
+import json, sys, time, urllib.request
+B = f"http://127.0.0.1:{sys.argv[1]}"
+bad = 0
+def check(name, cond):
+    global bad
+    print(("PASS  " if cond else "FAIL  ") + name); bad |= not cond
+def reqs():
+    with urllib.request.urlopen(B + "/requests", timeout=3) as x:
+        return json.loads(x.read())
+j = reqs()
+check("worker on: /requests says so", j["auto"] is True)
+check("a request left working by a dead server is marked interrupted, not re-run",
+      j["requests"][0]["status"] == "failed" and "interrupted" in j["requests"][0]["note"])
+r = urllib.request.Request(B + "/requests", method="POST", data=json.dumps({"url": "https://www.youtube.com/watch?v=new", "deck": "R"}).encode(),
+                           headers={"Content-Type": "application/json", "X-VS": "1"})
+with urllib.request.urlopen(r, timeout=3) as x:
+    rid = json.loads(x.read())["request"]["id"]
+end = time.time() + 20
+while time.time() < end:
+    st = next(q for q in reqs()["requests"] if q["id"] == rid)
+    if st["status"] == "failed":
+        break
+    time.sleep(0.25)
+check("an added song is picked up with no agent: the worker ran vs.py, which posted the chopper's error",
+      st["status"] == "failed" and "Python environment" in st["note"])
+sys.exit(bad)
+PY
+kill "$apid"
 
 # the chopper's guards, only if setup.sh has made the Python environment
 VENV_PY="$(bash -c '. "$1/config.sh"; echo "$VS_VENV/bin/python"' _ "$HERE")"

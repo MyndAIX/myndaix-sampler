@@ -6,8 +6,9 @@
   /api/packs       packs that have an analysis.json
   /control         command queue: an AI agent POSTs commands (vs.py), the app polls them (GET ?after=<seq>)
   /state           the app POSTs what it is doing; the agent GETs it
-  /requests        songs the player asked for (a link or a dropped file); the agent chops them (vs.py run)
-  /requests/<id>   the agent POSTs progress: working, done (with the pack), failed
+  /requests        songs the player asked for (a link or a dropped file). The server's chop worker runs
+                   them one at a time (vs.py run <id>); SAMPLER_AUTOCHOP=0 leaves them for an agent
+  /requests/<id>   vs.py run POSTs progress: working, done (with the pack), failed
   /upload          the app POSTs a dropped audio file (?name=&deck=); it lands in $SAMPLER_HOME/inbox/
   /stems/<slug>/<stem>.wav   a whole stem (or mix), read-only, for the chop editor
   /api/mine/<slug>           the player's own bank for a pack: owner, rev, pads, which stems can be cut
@@ -29,6 +30,7 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -56,7 +58,10 @@ AUDIO_EXT = {".wav", ".mp3", ".m4a", ".flac", ".aif", ".aiff", ".ogg"}
 URL_RE = re.compile(r"^https://[^\s\"'`$\\<>|;(){}]{1,500}$")
 STATUSES = {"working", "done", "failed"}
 
+AUTOCHOP = os.environ.get("SAMPLER_AUTOCHOP", "1") != "0"
+
 lock = threading.Lock()
+wake = threading.Event()   # set when a request is added: the chop worker looks at once
 queue = []          # [(seq, cmd dict)], newest last, capped
 seq = 0
 state = {}
@@ -70,12 +75,43 @@ def save_requests():
 
 
 def add_request(kind, src, deck):
+    deck = deck if deck in ("L", "R") else "L"
+    # the same song for the same deck already queued or chopping: that request, not a second one
+    # (pressing add again while nothing seemed to happen used to queue it four times)
+    for r in requests:
+        if r["kind"] == kind and r["src"] == src and r["deck"] == deck and r["status"] in ("waiting", "working"):
+            return r
     req = {"id": (requests[-1]["id"] + 1) if requests else 1, "kind": kind, "src": src,
-           "deck": deck if deck in ("L", "R") else "L", "status": "waiting", "note": "", "pack": None,
+           "deck": deck, "status": "waiting", "note": "", "pack": None,
            "t": int(time.time())}
     requests.append(req)
     save_requests()
+    wake.set()
     return req
+
+
+def chop_worker(port):
+    """Runs waiting requests one at a time, oldest first, through `vs.py run <id>`: the same path an
+    agent uses, so the link check, the progress posts and the deck load are one piece of code. One at
+    a time on purpose: two stem splits at once would only slow both down. vs.py marks the request
+    working itself (it refuses one already marked), so the worker never claims it first."""
+    env = dict(os.environ, VS_URL=f"http://127.0.0.1:{port}", SAMPLER_HOME=str(HOME))
+    while True:
+        wake.wait(5)
+        wake.clear()
+        while True:
+            with lock:
+                nxt = next((r for r in requests if r["status"] == "waiting"), None)
+            if nxt is None:
+                break
+            print(f"[{time.strftime('%H:%M:%S')}] chop worker: song #{nxt['id']}", flush=True)
+            subprocess.run([sys.executable, "-I", str(REPO / "vs.py"), "run", str(nxt["id"])],
+                           env=env, stdin=subprocess.DEVNULL)
+            with lock:          # vs.py died before posting anything: don't pick it again forever
+                if nxt["status"] == "waiting":
+                    nxt["status"], nxt["note"] = "failed", "the chopper did not start"
+                    save_requests()
+            print(f"[{time.strftime('%H:%M:%S')}] chop worker: song #{nxt['id']} {nxt['status']}", flush=True)
 
 
 def safe_name(name):
@@ -471,7 +507,7 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json(state)
         if u.path == "/requests":
             with lock:
-                return self.send_json({"requests": requests})
+                return self.send_json({"requests": requests, "auto": AUTOCHOP})
         if self.mine_routes(unquote(u.path)):
             return
         return super().do_GET()
@@ -615,7 +651,14 @@ if __name__ == "__main__":
             requests = json.loads(REQ_FILE.read_text())
         except ValueError:
             REQ_FILE.rename(REQ_FILE.with_suffix(f".bad-{int(time.time())}"))
+    # a request still "working" at start-up lost its chopper with the last server: say so, rather
+    # than leave it spinning forever (it is not re-run by itself, it may be an old one)
+    for r in requests:
+        if r.get("status") == "working":
+            r["status"], r["note"] = "failed", "interrupted (the server restarted): add it again"
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"sampler: http://127.0.0.1:{port}/", flush=True)
+    if AUTOCHOP:
+        threading.Thread(target=chop_worker, args=(port,), daemon=True).start()
     srv.serve_forever()

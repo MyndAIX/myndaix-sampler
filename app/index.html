@@ -688,7 +688,7 @@ $("add").onsubmit = async e => {
   const url = $("link").value.trim();
   if (!url) return;
   const [ok, j] = await postJSON("/requests", { url, deck: $("linkdeck").value });
-  if (ok) { $("link").value = ""; $("link").blur(); say(`Song #${j.request.id} added. Now ask your AI to chop it (AGENTS.md).`); pollRequests(true); }
+  if (ok) { $("link").value = ""; $("link").blur(); say(`Song #${j.request.id} added. ${S.autochop ? "Chopping it now (a few minutes); it lands on the deck by itself." : "Now ask your AI to chop it (AGENTS.md)."}`); pollRequests(true); }
   else say(j.error || "could not add that link");
 };
 for (const d of Object.values(DECKS)) {
@@ -703,21 +703,24 @@ for (const d of Object.values(DECKS)) {
     const r = await fetch(`/upload?name=${encodeURIComponent(f.name)}&deck=${d.id}`,
                           { method: "POST", headers: { "X-VS": "1", "Content-Type": "application/octet-stream" }, body: f });
     const j = await r.json().catch(() => ({}));
-    if (r.ok) { say(`Song #${j.request.id} added. Now ask your AI to chop it (AGENTS.md).`); pollRequests(true); }
+    if (r.ok) { say(`Song #${j.request.id} added. ${S.autochop ? "Chopping it now (a few minutes); it lands on the deck by itself." : "Now ask your AI to chop it (AGENTS.md)."}`); pollRequests(true); }
     else say(j.error || "upload failed");
   });
 }
 let reqTimer = null;
 async function pollRequests(once) {
   try {
-    const rs = (await (await fetch("/requests", { cache: "no-store" })).json()).requests.slice(-4);
+    const all = await (await fetch("/requests", { cache: "no-store" })).json();
+    S.autochop = !!all.auto;
+    const rs = all.requests.slice(-4);
     const el = $("reqs");
     el.textContent = "";
     for (const r of rs) {
       const span = document.createElement("span");
       span.className = r.status;
       const what = r.kind === "link" ? r.src.replace(/^https:\/\/(www\.)?/, "").slice(0, 40) : r.src;
-      span.textContent = `#${r.id} ${what}: ${r.status === "done" ? "on the pads" : r.status}${r.note ? " (" + r.note + ")" : ""}`;
+      const word = r.status === "done" ? "on the pads" : r.status === "waiting" && S.autochop ? "next up" : r.status;
+      span.textContent = `#${r.id} ${what}: ${word}${r.note ? " (" + r.note + ")" : ""}`;
       el.append(span, document.createTextNode("   "));
     }
   } catch (e) { /* server restarting */ }
