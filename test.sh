@@ -360,13 +360,13 @@ A="$LIB/auto"; mkdir -p "$A"
 echo '[{"id": 1, "kind": "link", "src": "https://www.youtube.com/watch?v=old", "deck": "L", "status": "working", "note": "", "pack": null, "t": 1}]' > "$A/requests.json"
 APORT=8767
 # a stand-in chopper: a link with "fast" fails at once with its own error, any other link hangs
-# (and records its pid, so the test can check the timeout stopped it)
+# and ignores SIGTERM (and records its pid, so the test can check the timeout still stopped it)
 mkdir -p "$LIB/fakevenv/bin"
 cat > "$LIB/fakevenv/bin/python" <<'SH'
 #!/bin/bash
 case "$*" in
   *fast*) echo "chopper error: boom"; exit 1 ;;
-  *) echo $$ > "$(dirname "$0")/../hung.pid"; exec sleep 60 ;;
+  *) trap '' TERM; echo $$ > "$(dirname "$0")/../hung.pid"; exec sleep 60 ;;   # ignores SIGTERM
 esac
 SH
 chmod +x "$LIB/fakevenv/bin/python"

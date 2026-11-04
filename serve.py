@@ -120,6 +120,29 @@ def chop_worker(port):
                 break
 
 
+def stop_group(proc):
+    """SIGTERM the chop's whole process group, give it 10 s, then SIGKILL whatever is left. Waits on
+    the GROUP, not just vs.py: a downloader that ignores SIGTERM outlives its parent, and the queue
+    must not move on while it still runs."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    end = time.time() + 10
+    while time.time() < end:
+        proc.poll()                          # reap vs.py, so a dead parent doesn't count as alive
+        try:
+            os.killpg(proc.pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.2)
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait()
+
+
 def run_one(r, port):
     token = "worker-" + secrets.token_hex(6)
     env = dict(os.environ, VS_URL=f"http://127.0.0.1:{port}", SAMPLER_HOME=str(HOME), VS_RUNNER=token)
@@ -132,16 +155,7 @@ def run_one(r, port):
         proc.wait(timeout=CHOP_TIMEOUT)
     except subprocess.TimeoutExpired:
         why = f"stopped after {CHOP_TIMEOUT // 60} min" if CHOP_TIMEOUT >= 60 else f"stopped after {CHOP_TIMEOUT} s"
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.killpg(proc.pid, sig)
-            except ProcessLookupError:
-                break
-            try:
-                proc.wait(timeout=10)
-                break
-            except subprocess.TimeoutExpired:
-                continue
+        stop_group(proc)
     with lock:
         if r["status"] == "waiting":                       # vs.py died before claiming it
             r["status"], r["note"] = "failed", "the chopper did not start"
