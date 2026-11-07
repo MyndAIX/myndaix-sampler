@@ -26,7 +26,7 @@
   .wrap { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px; }
   canvas { display:block; width:100%; height:200px; background:#0c0d0f; border:1px solid var(--line); border-radius:6px;
            cursor:crosshair; touch-action:none; }
-  #over { height:44px; margin-top:6px; cursor:pointer; }
+  #over { height:58px; margin-top:6px; cursor:pointer; }
   .sel { display:flex; gap:8px; align-items:center; margin:10px 0 0; font-family:ui-monospace, Menlo, monospace; font-size:12px; color:var(--dim); flex-wrap:wrap; }
   #chip { background:var(--hi); color:#111; border-radius:6px; padding:5px 10px; cursor:grab; font-weight:600; }
   #chip[hidden] { display:none; }
@@ -102,7 +102,7 @@ const STEM_LABEL = { other: "synth/keys", mix: "full mix" };
 const KEYS = ["z","x","c","v","a","s","d","f","q","w","e","r","1","2","3","4"];
 const E = { slug: null, meta: null, mine: null, stem: null, buf: null, dur: 0, lines: [], beats: [],
             v0: 0, v1: 1, sel: null, src: null, playAt: 0, playFrom: 0, playLen: 0, looping: false,
-            padBufs: {}, gen: 0, pgen: 0, owner: null, stale: false, want: null, ctx };
+            padBufs: {}, gen: 0, pgen: 0, owner: null, stale: false, want: null, secs: [], secs2: [], ctx };
 window.CE = E;                      // test hook
 
 async function getJSON(u) { const r = await fetch(u, { cache: "no-store" }); if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.status); return r.json(); }
@@ -116,9 +116,10 @@ async function openPack(slug) {
   const gen = ++E.gen, pgen = ++E.pgen;
   Object.assign(E, { slug: null, buf: null, stem: null, sel: null }); updateSel();
   say(`loading ${slug}…`);
-  const [meta, mine] = await Promise.all([getJSON(`/packs/${encodeURIComponent(slug)}/analysis.json`), getJSON(`/api/mine/${encodeURIComponent(slug)}`)]);
+  const [meta, mine, sf] = await Promise.all([getJSON(`/packs/${encodeURIComponent(slug)}/analysis.json`), getJSON(`/api/mine/${encodeURIComponent(slug)}`),
+                                             getJSON(`/packs/${encodeURIComponent(slug)}/songformer.json`).catch(() => null)]);
   if (gen !== E.gen || pgen !== E.pgen) return;
-  Object.assign(E, { slug, meta, mine, owner: mine.owner, stale: false, buf: null, sel: null, padBufs: {} });
+  Object.assign(E, { slug, meta, mine, sf, owner: mine.owner, stale: false, buf: null, sel: null, padBufs: {} });
   history.replaceState(null, "", `?pack=${encodeURIComponent(slug)}`);
   $("back").href = `/?left=${encodeURIComponent(slug)}`;
   renderStems(); renderPads(); loadPadBufs();
@@ -151,10 +152,14 @@ async function openStem(stem) {
   E.lines = CM.barLines(E.meta.bars_s, barlen, E.dur);
   E.beats = CM.beats(E.lines, barlen, E.dur);
   E.secs = CM.sections(E.meta.sections, E.meta.bars_s, E.dur);
+  // SongFormer's map (packs/<slug>/songformer.json, test only): a second band to compare by ear
+  E.secs2 = Array.isArray(E.sf) ? E.sf.filter(x => x && x.end > x.start)
+    .map(x => ({ t0: x.start, t1: Math.min(E.dur, x.end), name: x.label === "inst" ? "instrumental" : String(x.label), letter: "" })) : [];
   E.v0 = 0; E.v1 = E.dur; E.sel = null; peakCache = null;
   updateSel();
   const fmt = E.mine.formats[stem];
   say(`${E.slug} · ${STEM_LABEL[stem] || stem} · ${CM.clock(E.dur)} · ${E.lines.filter(l => l.bar > 0 && !l.end).length} bars` +
+      (E.secs2.length ? " · sections: top band ours, second band SongFormer" : "") +
       (fmt !== "pcm16" ? ` · view only: this stem is ${fmt}, so it can't be cut here` : "") +
       (E.mine.saveable ? "" : ` · view only: ${E.mine.why}`));
 }
@@ -212,15 +217,15 @@ function regions() {
 }
 
 // Section colours by kind of section; the letter after the name marks material that repeats
-const SEC_COLOR = { intro: "#4a5060", outro: "#4a5060", "verse?": "#2f5f8f", "chorus?": "#8f3f7a",
-                    "instrumental?": "#4f6f2f", "breakdown?": "#7a5a2f" };
+const SEC_COLOR = { intro: "#4a5060", outro: "#4a5060", silence: "#2a2d33", verse: "#2f5f8f", "pre-chorus": "#5a4f8f",
+                    chorus: "#8f3f7a", bridge: "#8f6a2f", instrumental: "#4f6f2f", breakdown: "#7a5a2f" };
 // One band of section blocks between y and y+h; the name sits at the block's left edge, or at the
 // band's left edge while the section's start is scrolled off screen
-function drawSections(g, X, W, y, h, dpr, v0, v1) {
-  for (const s of E.secs || []) {
+function drawSections(secs, g, X, W, y, h, dpr, v0, v1) {
+  for (const s of secs || []) {
     if (s.t1 < v0 || s.t0 > v1) continue;
     const x0 = Math.max(0, X(s.t0)), x1 = Math.min(W, X(s.t1));
-    g.fillStyle = SEC_COLOR[s.name] || "#555a63";
+    g.fillStyle = SEC_COLOR[s.name.replace("?", "")] || "#555a63";
     g.fillRect(x0, y, Math.max(dpr, x1 - x0 - dpr), h);
     const label = `${s.name} ${s.letter}`.trim();
     if (x1 - x0 < 24 * dpr) continue;
@@ -239,7 +244,7 @@ function draw() {
   const { v0, v1 } = E, X = t => (t - v0) / (v1 - v0) * W;
   const n = Math.max(1, Math.floor(W / dpr)), p = peaksFor(n, v0, v1);
   let norm = 1e-4; for (let i = 0; i < p.length; i++) norm = Math.max(norm, Math.abs(p[i]));
-  const top = (E.secs && E.secs.length ? 30 : 16) * dpr, mid = top + (H - top) / 2, amp = ((H - top) / 2 - 4 * dpr) / norm;
+  const nb = (E.secs.length ? 1 : 0) + (E.secs2.length ? 1 : 0), top = (16 + 14 * nb) * dpr, mid = top + (H - top) / 2, amp = ((H - top) / 2 - 4 * dpr) / norm;
   // regions under the wave
   g.font = `${10 * dpr}px ui-monospace, Menlo, monospace`;
   const regs = regions();
@@ -270,7 +275,8 @@ function draw() {
     g.fillRect(X(l.t), top, 1, H - top);
     if (l.bar > 0 && !l.end && (l.bar - 1) % every === 0) { g.fillStyle = C("--dim"); g.fillText(String(l.bar), X(l.t) + 2 * dpr, 11 * dpr); }
   }
-  drawSections(g, X, W, 15 * dpr, 13 * dpr, dpr, v0, v1);
+  drawSections(E.secs, g, X, W, 15 * dpr, 13 * dpr, dpr, v0, v1);
+  drawSections(E.secs2, g, X, W, (E.secs.length ? 29 : 15) * dpr, 13 * dpr, dpr, v0, v1);
   // region labels on top
   for (const r of regs) {
     if (r.t1 < v0 || r.t0 > v1 || X(r.t1) - X(r.t0) < 30 * dpr) continue;
@@ -295,9 +301,11 @@ function drawOverview() {
   }
   const p = overPeaks.p; let norm = 1e-4; for (let i = 0; i < p.length; i++) norm = Math.max(norm, Math.abs(p[i]));
   // section band on top, the whole song's wave under it
-  const band = E.secs && E.secs.length ? 15 * dpr : 0, wh = (H - band) / 2, wm = band + wh;
+  const b1 = E.secs && E.secs.length ? 15 * dpr : 0, b2 = E.secs2 && E.secs2.length ? 15 * dpr : 0;
+  const band = b1 + b2, wh = (H - band) / 2, wm = band + wh;
   g.font = `${10 * dpr}px ui-monospace, Menlo, monospace`;
-  if (band) drawSections(g, t => t / E.dur * W, W, 0, band - dpr, dpr, 0, E.dur);
+  if (b1) drawSections(E.secs, g, t => t / E.dur * W, W, 0, b1 - dpr, dpr, 0, E.dur);
+  if (b2) drawSections(E.secs2, g, t => t / E.dur * W, W, b1, b2 - dpr, dpr, 0, E.dur);
   g.fillStyle = "#4a4d55";
   for (let x = 0; x < n; x++) { const y0 = wm - p[2 * x + 1] * wh / norm, y1 = wm - p[2 * x] * wh / norm; g.fillRect(x * dpr, y0, dpr, Math.max(dpr, y1 - y0)); }
   for (const [, e] of CM.slots(E.mine && E.mine.pads).entries()) if (e && e.stem === E.stem) { g.fillStyle = C("--mine"); g.fillRect(e.a / e.sr / E.dur * W, H - 3 * dpr, Math.max(dpr, (e.b - e.a) / e.sr / E.dur * W), 3 * dpr); }
