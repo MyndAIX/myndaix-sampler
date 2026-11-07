@@ -257,6 +257,13 @@ const CM = sandbox.ChopMath;
   const sl = CM.slots({ "5": { file: "a.wav" }, "16": { file: "b.wav" }, "17": { file: "c.wav" }, "0": { file: "d.wav" }, x: { file: "e" }, "3": { nofile: 1 } });
   check("slots keep pad numbers in place, never compact, drop bad keys",
         sl.length === 16 && sl[4].file === "a.wav" && sl[15].file === "b.wav" && sl.filter(Boolean).length === 2);
+  const sec = CM.sections([{ bars: [1, 2], guess: "intro", letter: "A" }, { bars: [3, 4], guess: "hook?", letter: "B" },
+                           { bars: [5, 5], guess: "verse? (light drums)", letter: "C" }], [0.5, 2.5, 4.6, 6.5, 7.2], 9);
+  check("sections: bar spans become times, the first takes the pickup, the last runs to the end",
+        sec.map(s => `${s.t0}-${s.t1}`).join() === "0-4.6,4.6-7.2,7.2-9");
+  check("... hook reads as chorus, bracketed detail dropped, the ? kept",
+        sec.map(s => s.name).join() === "intro,chorus?,verse?");
+  check("... no section map: nothing to show", CM.sections(undefined, [0, 2], 4).length === 0);
 }
 
 // ---- the player's bank on a deck ("mine") ----

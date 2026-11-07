@@ -26,7 +26,7 @@
   .wrap { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px; }
   canvas { display:block; width:100%; height:200px; background:#0c0d0f; border:1px solid var(--line); border-radius:6px;
            cursor:crosshair; touch-action:none; }
-  #over { height:28px; margin-top:6px; cursor:pointer; }
+  #over { height:44px; margin-top:6px; cursor:pointer; }
   .sel { display:flex; gap:8px; align-items:center; margin:10px 0 0; font-family:ui-monospace, Menlo, monospace; font-size:12px; color:var(--dim); flex-wrap:wrap; }
   #chip { background:var(--hi); color:#111; border-radius:6px; padding:5px 10px; cursor:grab; font-weight:600; }
   #chip[hidden] { display:none; }
@@ -78,6 +78,8 @@
     <p class="help">
       <b>Select:</b> drag on the wave. It snaps to the nearest beat; hold <b>Shift</b> for whole bars, <b>Alt</b> for no snap.
       Beats are quarters of the detected bars, so on a drifting song they're close, not exact.<br>
+      <b>Sections:</b> the band over the wave names each part (intro, verse, chorus, outro). They're the chopper's guesses from
+      which stems play; a <b>?</b> means a guess, and the same letter means the same part repeating.<br>
       <b>Hear it:</b> Space plays the selection, L loops it, Esc stops. Click a shaded region to select what the AI chopped.<br>
       <b>Keep it:</b> drag the orange chip onto a pad, or Shift+click a pad. Click a pad to hear it, × to empty it.
       A replaced pick is kept on disk, never deleted. Nothing is stretched.<br>
@@ -148,6 +150,7 @@ async function openStem(stem) {
   const barlen = E.meta.barlen || 2;
   E.lines = CM.barLines(E.meta.bars_s, barlen, E.dur);
   E.beats = CM.beats(E.lines, barlen, E.dur);
+  E.secs = CM.sections(E.meta.sections, E.meta.bars_s, E.dur);
   E.v0 = 0; E.v1 = E.dur; E.sel = null; peakCache = null;
   updateSel();
   const fmt = E.mine.formats[stem];
@@ -208,6 +211,25 @@ function regions() {
   return out;
 }
 
+// Section colours by kind of section; the letter after the name marks material that repeats
+const SEC_COLOR = { intro: "#4a5060", outro: "#4a5060", "verse?": "#2f5f8f", "chorus?": "#8f3f7a",
+                    "instrumental?": "#4f6f2f", "breakdown?": "#7a5a2f" };
+// One band of section blocks between y and y+h; the name sits at the block's left edge, or at the
+// band's left edge while the section's start is scrolled off screen
+function drawSections(g, X, W, y, h, dpr, v0, v1) {
+  for (const s of E.secs || []) {
+    if (s.t1 < v0 || s.t0 > v1) continue;
+    const x0 = Math.max(0, X(s.t0)), x1 = Math.min(W, X(s.t1));
+    g.fillStyle = SEC_COLOR[s.name] || "#555a63";
+    g.fillRect(x0, y, Math.max(dpr, x1 - x0 - dpr), h);
+    const label = `${s.name} ${s.letter}`.trim();
+    if (x1 - x0 < 24 * dpr) continue;
+    g.save(); g.beginPath(); g.rect(x0, y, x1 - x0 - 2 * dpr, h); g.clip();
+    g.fillStyle = "#e8e8ea"; g.fillText(label, x0 + 3 * dpr, y + h - 3 * dpr);
+    g.restore();
+  }
+}
+
 function draw() {
   requestAnimationFrame(draw);
   const cv = $("wave");
@@ -217,7 +239,7 @@ function draw() {
   const { v0, v1 } = E, X = t => (t - v0) / (v1 - v0) * W;
   const n = Math.max(1, Math.floor(W / dpr)), p = peaksFor(n, v0, v1);
   let norm = 1e-4; for (let i = 0; i < p.length; i++) norm = Math.max(norm, Math.abs(p[i]));
-  const top = 16 * dpr, mid = top + (H - top) / 2, amp = ((H - top) / 2 - 4 * dpr) / norm;
+  const top = (E.secs && E.secs.length ? 30 : 16) * dpr, mid = top + (H - top) / 2, amp = ((H - top) / 2 - 4 * dpr) / norm;
   // regions under the wave
   g.font = `${10 * dpr}px ui-monospace, Menlo, monospace`;
   const regs = regions();
@@ -248,6 +270,7 @@ function draw() {
     g.fillRect(X(l.t), top, 1, H - top);
     if (l.bar > 0 && !l.end && (l.bar - 1) % every === 0) { g.fillStyle = C("--dim"); g.fillText(String(l.bar), X(l.t) + 2 * dpr, 11 * dpr); }
   }
+  drawSections(g, X, W, 15 * dpr, 13 * dpr, dpr, v0, v1);
   // region labels on top
   for (const r of regs) {
     if (r.t1 < v0 || r.t0 > v1 || X(r.t1) - X(r.t0) < 30 * dpr) continue;
@@ -271,8 +294,12 @@ function drawOverview() {
     const save = peakCache; overPeaks = { n, b: E.buf, p: peaksFor(n, 0, E.dur) }; peakCache = save;
   }
   const p = overPeaks.p; let norm = 1e-4; for (let i = 0; i < p.length; i++) norm = Math.max(norm, Math.abs(p[i]));
+  // section band on top, the whole song's wave under it
+  const band = E.secs && E.secs.length ? 15 * dpr : 0, wh = (H - band) / 2, wm = band + wh;
+  g.font = `${10 * dpr}px ui-monospace, Menlo, monospace`;
+  if (band) drawSections(g, t => t / E.dur * W, W, 0, band - dpr, dpr, 0, E.dur);
   g.fillStyle = "#4a4d55";
-  for (let x = 0; x < n; x++) { const y0 = H / 2 - p[2 * x + 1] * (H / 2) / norm, y1 = H / 2 - p[2 * x] * (H / 2) / norm; g.fillRect(x * dpr, y0, dpr, Math.max(dpr, y1 - y0)); }
+  for (let x = 0; x < n; x++) { const y0 = wm - p[2 * x + 1] * wh / norm, y1 = wm - p[2 * x] * wh / norm; g.fillRect(x * dpr, y0, dpr, Math.max(dpr, y1 - y0)); }
   for (const [, e] of CM.slots(E.mine && E.mine.pads).entries()) if (e && e.stem === E.stem) { g.fillStyle = C("--mine"); g.fillRect(e.a / e.sr / E.dur * W, H - 3 * dpr, Math.max(dpr, (e.b - e.a) / e.sr / E.dur * W), 3 * dpr); }
   if (E.sel) { g.fillStyle = C("--hi"); g.fillRect(E.sel.t0 / E.dur * W, 0, Math.max(dpr, (E.sel.t1 - E.sel.t0) / E.dur * W), H); }
   g.strokeStyle = C("--text"); g.lineWidth = dpr;

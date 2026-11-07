@@ -79,7 +79,26 @@
     return out;
   }
 
-  const api = { barLines, beats, nearest, snap, where, clock, slots };
+  // The chopper's section map (analysis.json sections) as times. Section bars [a, b] run from
+  // bars_s[a-1] to bars_s[b]. The first section also takes the pickup before bar 1, the last runs to
+  // the song's end. Names are the chopper's guesses, kept with their "?"; "hook" reads as "chorus",
+  // and detail in brackets is dropped from the label.
+  function sections(secs, bars, dur) {
+    if (!Array.isArray(secs) || !bars || bars.length < 2) return [];
+    const out = [];
+    for (const s of secs) {
+      if (!s || !Array.isArray(s.bars)) continue;
+      const [a, b] = s.bars;
+      const t0 = bars[Math.max(0, a - 1)], t1 = b < bars.length ? bars[b] : dur;
+      if (!(t1 > t0)) continue;
+      const name = String(s.guess || "").replace(/\s*\(.*\)\s*$/, "").replace(/^hook/, "chorus") || "section";
+      out.push({ t0, t1, name, letter: s.letter || "" });
+    }
+    if (out.length) { out[0].t0 = 0; out[out.length - 1].t1 = dur; }
+    return out;
+  }
+
+  const api = { barLines, beats, nearest, snap, where, clock, slots, sections };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.ChopMath = api;
 })(this);

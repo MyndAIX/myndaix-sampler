@@ -462,6 +462,21 @@ class Handler(SimpleHTTPRequestHandler):
             out = super().translate_path(p)
         return out if inside(out, self.directory) else os.path.join(self.directory, ".denied", "404")  # a path that never exists -> 404
 
+    # Static files (the app, packs) go out with Last-Modified and no Cache-Control, so a browser
+    # may reuse a cached copy without asking: after an update the page ran an old chopmath.js.
+    # no-cache makes it revalidate every time (a 304 when unchanged).
+    def send_head(self):
+        self._static = True
+        try:
+            return super().send_head()
+        finally:
+            self._static = False
+
+    def end_headers(self):
+        if getattr(self, "_static", False):
+            self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+
     def host_ok(self):
         port = self.server.server_address[1]
         allowed = {f"127.0.0.1:{port}", f"localhost:{port}"}
